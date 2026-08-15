@@ -51,6 +51,8 @@ Strict replay rejects zero-output records. Such records need a separate prefill-
 
 The default timing mode never retimes late requests. The run is invalid when local admission or target backpressure causes excessive dispatch lag.
 
+Shape-strict replay requires `--max-in-flight` to be at least the selected request count so response speed cannot hold back a recorded arrival. On Unix, the process raises its soft open-file limit to support the requested capacity or fails before network traffic starts.
+
 ## Compare traces
 
 Enable Dynamo request tracing during replay. Then compare the captured trace with the source trace.

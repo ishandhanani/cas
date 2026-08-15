@@ -129,6 +129,8 @@ pub async fn run_replay(
             trace.manifest.zero_output_requests
         );
     }
+    validate_recorded_capacity(trace.manifest.request_count, options.max_in_flight)?;
+    prepare_open_file_limit(options.max_in_flight)?;
     fs::create_dir_all(&options.output_dir).with_context(|| {
         format!(
             "failed to create output directory {}",
@@ -366,6 +368,53 @@ fn validate_options(options: &ReplayOptions) -> Result<()> {
         HeaderValue::from_str(value)
             .with_context(|| format!("invalid value for static header {name:?}"))?;
     }
+    Ok(())
+}
+
+fn validate_recorded_capacity(request_count: usize, max_in_flight: usize) -> Result<()> {
+    if max_in_flight < request_count {
+        bail!(
+            "shape-strict recorded replay requires max_in_flight ({max_in_flight}) to be at least the request count ({request_count}); a lower cap can retime arrivals when responses drain slowly"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn prepare_open_file_limit(max_in_flight: usize) -> Result<()> {
+    const RESERVED_FILE_DESCRIPTORS: usize = 64;
+
+    let desired = max_in_flight
+        .checked_add(RESERVED_FILE_DESCRIPTORS)
+        .context("the requested open-file limit overflows usize")?;
+    let desired = libc::rlim_t::try_from(desired)
+        .context("the requested open-file limit does not fit rlim_t")?;
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to read RLIMIT_NOFILE");
+    }
+    if limit.rlim_cur >= desired {
+        return Ok(());
+    }
+    if limit.rlim_max < desired {
+        bail!(
+            "max_in_flight requires at least {desired} open files, but RLIMIT_NOFILE hard limit is {}",
+            limit.rlim_max
+        );
+    }
+    limit.rlim_cur = desired;
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to raise RLIMIT_NOFILE soft limit to {desired}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_open_file_limit(_max_in_flight: usize) -> Result<()> {
     Ok(())
 }
 
@@ -782,15 +831,6 @@ mod tests {
             .unwrap()
     }
 
-    async fn slow_shape_endpoint(
-        State(capture): State<Capture>,
-        headers: HeaderMap,
-        Json(body): Json<serde_json::Value>,
-    ) -> Response<Body> {
-        tokio::time::sleep(Duration::from_millis(15)).await;
-        shape_endpoint(State(capture), headers, Json(body)).await
-    }
-
     #[tokio::test]
     async fn replay_sends_shape_and_agent_headers() {
         let capture = Capture::default();
@@ -970,75 +1010,11 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reports_admission_backpressure_separately_from_scheduler_wake() {
-        let capture = Capture::default();
-        let app = Router::new()
-            .route("/v1/chat/completions", post(slow_shape_endpoint))
-            .with_state(capture);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let requests = (0..3)
-            .map(|ordinal| TraceRequest {
-                ordinal,
-                source_request_id: format!("source-{ordinal}"),
-                source_x_request_id: None,
-                source_model: None,
-                input_tokens: 3,
-                output_tokens: 2,
-                request_received_ms: 1_000,
-                trace_block_size: 2,
-                input_sequence_hashes: vec![11, 22],
-                agent_context: None,
-            })
-            .collect::<Vec<_>>();
-        let dictionary =
-            TokenDictionary::build(&requests, SafeTokenAlphabet::new(100, 16).unwrap()).unwrap();
-        let trace = LoadedTrace {
-            requests,
-            manifest: TraceManifest {
-                request_count: 3,
-                zero_output_requests: 0,
-                session_count: 0,
-                requests_with_agent_context: 0,
-                first_request_received_ms: 1_000,
-                last_request_received_ms: 1_000,
-                duration_ms: 0,
-                input_tokens: 9,
-                output_tokens: 6,
-                distinct_sequence_hashes: 2,
-                trace_block_size: 2,
-                source_digest_sha256: "source".to_string(),
-            },
-        };
-        let output = tempdir().unwrap();
-        let summary = run_replay(
-            trace,
-            dictionary,
-            ReplayOptions {
-                agent: AgentKind::Codex,
-                model: "test-model".to_string(),
-                target: format!("http://{address}"),
-                output_dir: output.path().to_path_buf(),
-                max_in_flight: 1,
-                warmup_connections: 0,
-                start_delay: Duration::from_millis(10),
-                timeout: Duration::from_secs(5),
-                time_scale: 1.0,
-                preserve_request_ids: false,
-                static_headers: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(summary.succeeded, 3);
-        assert!(summary.local_admission_lag_ms.max >= 20.0);
-        assert!(summary.dispatch_lag_ms.max >= summary.local_admission_lag_ms.max);
-        assert!(summary.scheduler_wake_lag_ms.max < summary.local_admission_lag_ms.max);
-        server.abort();
+    #[test]
+    fn rejects_a_local_cap_that_can_retime_recorded_arrivals() {
+        let error = validate_recorded_capacity(3, 2).unwrap_err();
+        assert!(error.to_string().contains("can retime arrivals"));
+        validate_recorded_capacity(3, 3).unwrap();
     }
 
     #[test]
