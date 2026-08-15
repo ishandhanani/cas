@@ -20,7 +20,11 @@ pub fn agent_headers(
     let Some(context) = context else {
         return Vec::new();
     };
-    let mut headers = match kind {
+    let mut headers = vec![("x-dynamo-session-id", context.session_id.clone())];
+    if let Some(parent) = &context.parent_session_id {
+        headers.push(("x-dynamo-parent-session-id", parent.clone()));
+    }
+    headers.extend(match kind {
         AgentKind::ClaudeCode => {
             if let Some(parent) = &context.parent_session_id {
                 vec![
@@ -46,7 +50,7 @@ pub fn agent_headers(
             }
             values
         }
-    };
+    });
     if let Some(finality) = context.session_final {
         headers.push(("x-dynamo-session-final", finality.to_string()));
     }
@@ -68,6 +72,8 @@ mod tests {
         assert_eq!(
             agent_headers(AgentKind::Codex, Some(&context)),
             vec![
+                ("x-dynamo-session-id", "child".to_string()),
+                ("x-dynamo-parent-session-id", "parent".to_string()),
                 ("thread-id", "child".to_string()),
                 ("x-codex-parent-thread-id", "parent".to_string()),
                 ("x-dynamo-session-final", "true".to_string())
@@ -86,6 +92,8 @@ mod tests {
         assert_eq!(
             agent_headers(AgentKind::ClaudeCode, Some(&context)),
             vec![
+                ("x-dynamo-session-id", "child".to_string()),
+                ("x-dynamo-parent-session-id", "parent".to_string()),
                 ("x-claude-code-session-id", "parent".to_string()),
                 ("x-claude-code-agent-id", "child".to_string()),
                 ("x-claude-code-parent-agent-id", "parent".to_string())

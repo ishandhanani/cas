@@ -677,6 +677,7 @@ mod tests {
         assert_eq!(summary.output_length_matches, 1);
         let (headers, body) = capture.0.lock().unwrap().clone().unwrap();
         assert_eq!(headers.get("thread-id").unwrap(), "thread-1");
+        assert_eq!(headers.get("x-dynamo-session-id").unwrap(), "thread-1");
         assert_eq!(body["max_tokens"], 2);
         assert_eq!(body["min_tokens"], 2);
         assert_eq!(body["ignore_eos"], true);
