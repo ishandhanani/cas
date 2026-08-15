@@ -343,7 +343,6 @@ fn prepare_request(
         "stream": true,
         "stream_options": {"include_usage": true},
         "max_tokens": request.output_tokens,
-        "min_tokens": request.output_tokens,
         "ignore_eos": true,
         "temperature": 0.0,
         "nvext": {"token_data": tokens}
