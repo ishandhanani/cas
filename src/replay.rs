@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::json;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -105,6 +105,7 @@ struct ReplayContext {
 struct PreparedRequest {
     metadata: PreparedMetadata,
     http_request: reqwest::Request,
+    session_gate: Option<Arc<Mutex<()>>>,
 }
 
 struct PreparedMetadata {
@@ -186,7 +187,12 @@ pub async fn run_replay(
                 .expect("the deadline was validated before queue release");
             let context = context.clone();
             let semaphore = Arc::clone(&semaphore);
+            let session_gate = ready.value.session_gate.clone();
             tasks.spawn(async move {
+                let _session_guard = match session_gate {
+                    Some(gate) => Some(gate.lock_owned().await),
+                    None => None,
+                };
                 let permit = semaphore
                     .acquire_owned()
                     .await
@@ -235,13 +241,29 @@ fn prepare_schedule(
     first_received_ms: u64,
 ) -> Result<ReadyQueue<PreparedRequest>> {
     let mut schedule = ReadyQueue::with_capacity(requests.len());
+    let mut session_gates = HashMap::<String, Arc<Mutex<()>>>::new();
     for request in requests {
         let ready_at_ns = scaled_offset_ns(
             request.request_received_ms - first_received_ms,
             options.time_scale,
         )?;
         let ordinal = request.ordinal;
-        let prepared = prepare_request(client, target, run_id, options, dictionary, request)?;
+        let session_gate = request.agent_context.as_ref().map(|context| {
+            Arc::clone(
+                session_gates
+                    .entry(context.session_id.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        });
+        let prepared = prepare_request(
+            client,
+            target,
+            run_id,
+            options,
+            dictionary,
+            request,
+            session_gate,
+        )?;
         schedule.push(ready_at_ns, ordinal, prepared);
     }
     Ok(schedule)
@@ -254,6 +276,7 @@ fn prepare_request(
     options: &ReplayOptions,
     dictionary: &TokenDictionary,
     request: TraceRequest,
+    session_gate: Option<Arc<Mutex<()>>>,
 ) -> Result<PreparedRequest> {
     let tokens = dictionary.synthesize(&request)?;
     let replay_request_id = if options.preserve_request_ids {
@@ -303,6 +326,7 @@ fn prepare_request(
     Ok(PreparedRequest {
         metadata,
         http_request,
+        session_gate,
     })
 }
 
