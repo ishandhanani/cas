@@ -782,6 +782,15 @@ mod tests {
             .unwrap()
     }
 
+    async fn slow_shape_endpoint(
+        State(capture): State<Capture>,
+        headers: HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> Response<Body> {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        shape_endpoint(State(capture), headers, Json(body)).await
+    }
+
     #[tokio::test]
     async fn replay_sends_shape_and_agent_headers() {
         let capture = Capture::default();
@@ -958,6 +967,77 @@ mod tests {
         assert_eq!(summary.output_length_matches, 96);
         assert!(summary.scheduler_wake_lag_ms.p99 < 100.0);
         assert!(summary.dispatch_lag_ms.p99 < 100.0);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reports_admission_backpressure_separately_from_scheduler_wake() {
+        let capture = Capture::default();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(slow_shape_endpoint))
+            .with_state(capture);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let requests = (0..3)
+            .map(|ordinal| TraceRequest {
+                ordinal,
+                source_request_id: format!("source-{ordinal}"),
+                source_x_request_id: None,
+                source_model: None,
+                input_tokens: 3,
+                output_tokens: 2,
+                request_received_ms: 1_000,
+                trace_block_size: 2,
+                input_sequence_hashes: vec![11, 22],
+                agent_context: None,
+            })
+            .collect::<Vec<_>>();
+        let dictionary =
+            TokenDictionary::build(&requests, SafeTokenAlphabet::new(100, 16).unwrap()).unwrap();
+        let trace = LoadedTrace {
+            requests,
+            manifest: TraceManifest {
+                request_count: 3,
+                zero_output_requests: 0,
+                session_count: 0,
+                requests_with_agent_context: 0,
+                first_request_received_ms: 1_000,
+                last_request_received_ms: 1_000,
+                duration_ms: 0,
+                input_tokens: 9,
+                output_tokens: 6,
+                distinct_sequence_hashes: 2,
+                trace_block_size: 2,
+                source_digest_sha256: "source".to_string(),
+            },
+        };
+        let output = tempdir().unwrap();
+        let summary = run_replay(
+            trace,
+            dictionary,
+            ReplayOptions {
+                agent: AgentKind::Codex,
+                model: "test-model".to_string(),
+                target: format!("http://{address}"),
+                output_dir: output.path().to_path_buf(),
+                max_in_flight: 1,
+                warmup_connections: 0,
+                start_delay: Duration::from_millis(10),
+                timeout: Duration::from_secs(5),
+                time_scale: 1.0,
+                preserve_request_ids: false,
+                static_headers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.succeeded, 3);
+        assert!(summary.local_admission_lag_ms.max >= 20.0);
+        assert!(summary.dispatch_lag_ms.max >= summary.local_admission_lag_ms.max);
+        assert!(summary.scheduler_wake_lag_ms.max < summary.local_admission_lag_ms.max);
         server.abort();
     }
 
