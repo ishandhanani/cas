@@ -30,6 +30,8 @@ pub struct AgentContext {
     #[serde(default)]
     pub session_final: Option<bool>,
     #[serde(default)]
+    pub compaction: Option<serde_json::Value>,
+    #[serde(default)]
     pub input_trigger: Option<String>,
 }
 

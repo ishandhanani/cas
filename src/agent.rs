@@ -2,6 +2,7 @@
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::trace::AgentContext;
 
@@ -54,6 +55,12 @@ pub fn agent_headers(
     if let Some(finality) = context.session_final {
         headers.push(("x-dynamo-session-final", finality.to_string()));
     }
+    if let (AgentKind::Codex, Some(compaction)) = (kind, context.compaction.as_ref()) {
+        headers.push((
+            "x-codex-turn-metadata",
+            json!({"request_kind": "compaction", "compaction": compaction}).to_string(),
+        ));
+    }
     headers
 }
 
@@ -67,6 +74,7 @@ mod tests {
             session_id: "child".to_string(),
             parent_session_id: Some("parent".to_string()),
             session_final: Some(true),
+            compaction: None,
             input_trigger: None,
         };
         assert_eq!(
@@ -87,6 +95,7 @@ mod tests {
             session_id: "child".to_string(),
             parent_session_id: Some("parent".to_string()),
             session_final: None,
+            compaction: None,
             input_trigger: None,
         };
         assert_eq!(

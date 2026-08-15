@@ -630,6 +630,7 @@ mod tests {
                 session_id: "thread-1".to_string(),
                 parent_session_id: None,
                 session_final: None,
+                compaction: Some(serde_json::json!({"phase": "mid_turn"})),
                 input_trigger: Some("tool_result".to_string()),
             }),
         };
@@ -677,10 +678,24 @@ mod tests {
         let (headers, body) = capture.0.lock().unwrap().clone().unwrap();
         assert_eq!(headers.get("thread-id").unwrap(), "thread-1");
         assert_eq!(headers.get("x-dynamo-session-id").unwrap(), "thread-1");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                headers
+                    .get("x-codex-turn-metadata")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+            serde_json::json!({
+                "request_kind": "compaction",
+                "compaction": {"phase": "mid_turn"}
+            })
+        );
         assert_eq!(body["max_tokens"], 2);
         assert_eq!(body["min_tokens"], 2);
         assert_eq!(body["ignore_eos"], true);
-        assert_eq!(body["messages"][0]["role"], "tool");
+        assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["nvext"]["token_data"].as_array().unwrap().len(), 3);
         assert!(output.path().join("run.json").is_file());
         assert!(output.path().join("requests.jsonl").is_file());
