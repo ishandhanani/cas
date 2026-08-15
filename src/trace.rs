@@ -29,6 +29,8 @@ pub struct AgentContext {
     pub parent_session_id: Option<String>,
     #[serde(default)]
     pub session_final: Option<bool>,
+    #[serde(default)]
+    pub input_trigger: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

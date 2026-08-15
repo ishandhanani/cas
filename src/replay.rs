@@ -210,7 +210,12 @@ async fn send_request(
     };
     let body = json!({
         "model": context.options.model,
-        "messages": [{"role": "user", "content": "shape replay"}],
+        "messages": messages_for_trigger(
+            request
+                .agent_context
+                .as_ref()
+                .and_then(|agent_context| agent_context.input_trigger.as_deref())
+        ),
         "stream": true,
         "stream_options": {"include_usage": true},
         "max_tokens": request.output_tokens,
@@ -300,6 +305,18 @@ async fn send_request(
         Err(error) => result.error = Some(error.to_string()),
     }
     Ok(result)
+}
+
+fn messages_for_trigger(input_trigger: Option<&str>) -> serde_json::Value {
+    match input_trigger {
+        Some("tool_result") => json!([{
+            "role": "tool",
+            "tool_call_id": "agent-loadgen-shape-tool",
+            "content": "shape replay"
+        }]),
+        Some("other") => json!([{"role": "assistant", "content": "shape replay"}]),
+        _ => json!([{"role": "user", "content": "shape replay"}]),
+    }
 }
 
 #[derive(Debug)]
@@ -614,6 +631,7 @@ mod tests {
                 session_id: "thread-1".to_string(),
                 parent_session_id: None,
                 session_final: None,
+                input_trigger: Some("tool_result".to_string()),
             }),
         };
         let trace = LoadedTrace {
@@ -662,6 +680,7 @@ mod tests {
         assert_eq!(body["max_tokens"], 2);
         assert_eq!(body["min_tokens"], 2);
         assert_eq!(body["ignore_eos"], true);
+        assert_eq!(body["messages"][0]["role"], "tool");
         assert_eq!(body["nvext"]["token_data"].as_array().unwrap().len(), 3);
         assert!(output.path().join("run.json").is_file());
         assert!(output.path().join("requests.jsonl").is_file());

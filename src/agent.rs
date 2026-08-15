@@ -63,6 +63,7 @@ mod tests {
             session_id: "child".to_string(),
             parent_session_id: Some("parent".to_string()),
             session_final: Some(true),
+            input_trigger: None,
         };
         assert_eq!(
             agent_headers(AgentKind::Codex, Some(&context)),
@@ -80,6 +81,7 @@ mod tests {
             session_id: "child".to_string(),
             parent_session_id: Some("parent".to_string()),
             session_final: None,
+            input_trigger: None,
         };
         assert_eq!(
             agent_headers(AgentKind::ClaudeCode, Some(&context)),
