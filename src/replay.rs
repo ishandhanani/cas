@@ -310,8 +310,7 @@ async fn send_request(
 fn messages_for_trigger(input_trigger: Option<&str>) -> serde_json::Value {
     match input_trigger {
         Some("tool_result") => json!([{
-            "role": "tool",
-            "tool_call_id": "agent-loadgen-shape-tool",
+            "role": "user",
             "content": "shape replay"
         }]),
         Some("other") => json!([{"role": "assistant", "content": "shape replay"}]),
