@@ -85,6 +85,10 @@ enum Command {
         #[arg(long, default_value_t = 4096)]
         max_in_flight: usize,
 
+        /// Number of idle HTTP connections prepared through /v1/models before replay.
+        #[arg(long, default_value_t = 1)]
+        warmup_connections: usize,
+
         /// Delay before the first scheduled request.
         #[arg(long, default_value_t = 100)]
         start_delay_ms: u64,
@@ -156,6 +160,7 @@ async fn main() -> Result<()> {
             token_start,
             token_alphabet_size,
             max_in_flight,
+            warmup_connections,
             start_delay_ms,
             timeout_seconds,
             time_scale,
@@ -176,6 +181,7 @@ async fn main() -> Result<()> {
                     target,
                     output_dir: output,
                     max_in_flight,
+                    warmup_connections,
                     start_delay: Duration::from_millis(start_delay_ms),
                     timeout: Duration::from_secs(timeout_seconds),
                     time_scale,

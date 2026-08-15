@@ -10,7 +10,11 @@ The replayer does not use prompt content. It maps recorded sequence hashes to de
 - Reject incomplete request-end records before network traffic starts.
 - Preserve block-level prefix equality, exact input length, exact requested output length, and recorded arrival offsets.
 - Map Claude Code, Codex, and OpenCode session context to Dynamo headers.
+- Preserve user-message, tool-result, and other input triggers with valid dummy Chat Completions messages.
+- Preserve Codex compaction metadata through `x-codex-turn-metadata` when the trace contains it.
 - Send streaming Chat Completions requests and write request and run results.
+- Prepare request bodies before the timing anchor, then dispatch them from one stable ready-time queue.
+- Use Linux `timerfd` pacing and optional HTTP connection warmup before the recorded schedule starts.
 
 The generator for sampled coding-agent traffic is a later phase.
 
@@ -36,6 +40,7 @@ agent-loadgen replay trace.jsonl.gz \
   --model zai-org/GLM-4.7-Flash \
   --target http://127.0.0.1:8000 \
   --output artifacts/replay \
+  --warmup-connections 4 \
   --token-start 1000 \
   --token-alphabet-size 1024
 ```
@@ -43,6 +48,8 @@ agent-loadgen replay trace.jsonl.gz \
 The target can be a base URL or a full `/v1/chat/completions` URL. The token range must contain valid, non-special token IDs for the target model.
 
 Strict replay rejects zero-output records. Such records need a separate prefill-only or cancellation policy.
+
+The default timing mode never retimes late requests. The run is invalid when local admission or target backpressure causes excessive dispatch lag.
 
 ## Compare traces
 
@@ -59,5 +66,5 @@ The comparison checks exact ISL, exact OSL, agent context, canonical prefix topo
 
 ## Outputs
 
-- `run.json` contains the run configuration, shape manifest, timing percentiles, and length fidelity.
-- `requests.jsonl` contains one result for each replay request.
+- `run.json` contains the run configuration, shape manifest, timer backend, timing percentiles, and length fidelity.
+- `requests.jsonl` contains scheduler-wake, local-admission, dispatch, response, and fidelity data for each request.

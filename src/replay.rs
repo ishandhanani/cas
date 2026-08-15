@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
@@ -14,12 +14,13 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::agent::{AgentKind, agent_headers};
+use crate::clock::{TIMER_BACKEND, sleep_until};
+use crate::scheduler::ReadyQueue;
 use crate::token_shape::{TokenDictionary, TokenDictionaryManifest};
-use crate::trace::{LoadedTrace, TraceManifest, TraceRequest};
+use crate::trace::{AgentContext, LoadedTrace, TraceManifest, TraceRequest};
 
 #[derive(Debug, Clone)]
 pub struct ReplayOptions {
@@ -28,6 +29,7 @@ pub struct ReplayOptions {
     pub target: String,
     pub output_dir: PathBuf,
     pub max_in_flight: usize,
+    pub warmup_connections: usize,
     pub start_delay: Duration,
     pub timeout: Duration,
     pub time_scale: f64,
@@ -44,8 +46,11 @@ pub struct RequestResult {
     pub session_id: Option<String>,
     pub parent_session_id: Option<String>,
     pub scheduled_offset_ms: f64,
+    pub scheduler_wake_offset_ms: f64,
+    pub scheduler_wake_lag_ms: f64,
     pub dispatch_offset_ms: f64,
     pub dispatch_lag_ms: f64,
+    pub local_admission_lag_ms: f64,
     pub expected_input_tokens: usize,
     pub expected_output_tokens: u32,
     pub observed_output_tokens: Option<u64>,
@@ -65,6 +70,8 @@ pub struct RunSummary {
     pub target: String,
     pub time_scale: f64,
     pub max_in_flight: usize,
+    pub warmup_connections: usize,
+    pub timer_backend: &'static str,
     pub static_header_names: Vec<String>,
     pub source: TraceManifest,
     pub token_dictionary: TokenDictionaryManifest,
@@ -74,7 +81,9 @@ pub struct RunSummary {
     pub output_length_matches: usize,
     pub output_length_mismatches: usize,
     pub missing_output_usage: usize,
+    pub scheduler_wake_lag_ms: Percentiles,
     pub dispatch_lag_ms: Percentiles,
+    pub local_admission_lag_ms: Percentiles,
     pub total_time_ms: f64,
 }
 
@@ -90,11 +99,22 @@ pub struct Percentiles {
 #[derive(Clone)]
 struct ReplayContext {
     client: reqwest::Client,
-    target: String,
-    run_id: String,
     base: Instant,
-    dictionary: Arc<TokenDictionary>,
-    options: Arc<ReplayOptions>,
+}
+
+struct PreparedRequest {
+    metadata: PreparedMetadata,
+    http_request: reqwest::Request,
+}
+
+struct PreparedMetadata {
+    ordinal: usize,
+    source_request_id: String,
+    source_x_request_id: Option<String>,
+    replay_request_id: String,
+    agent_context: Option<AgentContext>,
+    input_tokens: usize,
+    output_tokens: u32,
 }
 
 pub async fn run_replay(
@@ -124,41 +144,66 @@ pub async fn run_replay(
         .context("failed to build the HTTP client")?;
     let target = normalize_target(&options.target);
     let run_id = Uuid::new_v4().to_string();
-    let base = Instant::now() + options.start_delay;
+    let LoadedTrace {
+        requests,
+        manifest: source_manifest,
+    } = trace;
+    let token_manifest = dictionary.manifest().clone();
+    let mut schedule = prepare_schedule(
+        requests,
+        &dictionary,
+        &client,
+        &target,
+        &run_id,
+        &options,
+        source_manifest.first_request_received_ms,
+    )?;
+    warm_connections(&client, &target, &options).await?;
+
     let wall_started = Instant::now();
-    let first_received_ms = trace.manifest.first_request_received_ms;
+    let base = wall_started
+        .checked_add(options.start_delay)
+        .context("replay start delay exceeds the monotonic clock range")?;
     let semaphore = Arc::new(Semaphore::new(options.max_in_flight));
-    let dictionary = Arc::new(dictionary);
     let options = Arc::new(options);
-    let context = ReplayContext {
-        client,
-        target: target.clone(),
-        run_id: run_id.clone(),
-        base,
-        dictionary: Arc::clone(&dictionary),
-        options: Arc::clone(&options),
-    };
+    let context = ReplayContext { client, base };
     let mut tasks = JoinSet::new();
 
-    for request in trace.requests.iter().cloned() {
-        let relative_ms =
-            (request.request_received_ms - first_received_ms) as f64 / options.time_scale;
-        let scheduled = base + Duration::from_secs_f64(relative_ms / 1000.0);
-        let context = context.clone();
-        let semaphore = Arc::clone(&semaphore);
-        tasks.spawn(async move {
-            tokio::time::sleep_until(scheduled).await;
-            let permit = semaphore
-                .acquire_owned()
-                .await
-                .context("the replay semaphore closed")?;
-            let result = send_request(&context, scheduled, request).await;
-            drop(permit);
-            result
-        });
+    while let Some(next_ready_ns) = schedule.next_ready_at_ns() {
+        let deadline = base
+            .checked_add(Duration::from_nanos(next_ready_ns))
+            .context("a replay timestamp exceeds the monotonic clock range")?;
+        sleep_until(deadline).await;
+
+        let now_ns = duration_ns(Instant::now().saturating_duration_since(base));
+        let due = schedule.pop_due(now_ns, usize::MAX);
+        for ready in due {
+            let scheduler_wake = Instant::now();
+            let scheduled = base
+                .checked_add(Duration::from_nanos(ready.ready_at_ns))
+                .expect("the deadline was validated before queue release");
+            let context = context.clone();
+            let semaphore = Arc::clone(&semaphore);
+            tasks.spawn(async move {
+                let permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .context("the replay semaphore closed")?;
+                let result = send_request(
+                    &context,
+                    scheduled,
+                    scheduler_wake,
+                    ready.ready_at_ns,
+                    ready.value,
+                )
+                .await;
+                drop(permit);
+                result
+            });
+        }
     }
 
-    let mut results = Vec::with_capacity(trace.requests.len());
+    let mut results = Vec::with_capacity(source_manifest.request_count);
     while let Some(result) = tasks.join_next().await {
         results.push(result.context("a replay task failed")??);
     }
@@ -168,8 +213,8 @@ pub async fn run_replay(
     let summary = summarize(
         run_id,
         &target,
-        &trace.manifest,
-        dictionary.manifest(),
+        &source_manifest,
+        &token_manifest,
         &options,
         &results,
         wall_started.elapsed(),
@@ -178,12 +223,139 @@ pub async fn run_replay(
     Ok(summary)
 }
 
+fn prepare_schedule(
+    requests: Vec<TraceRequest>,
+    dictionary: &TokenDictionary,
+    client: &reqwest::Client,
+    target: &str,
+    run_id: &str,
+    options: &ReplayOptions,
+    first_received_ms: u64,
+) -> Result<ReadyQueue<PreparedRequest>> {
+    let mut schedule = ReadyQueue::with_capacity(requests.len());
+    for request in requests {
+        let ready_at_ns = scaled_offset_ns(
+            request.request_received_ms - first_received_ms,
+            options.time_scale,
+        )?;
+        let ordinal = request.ordinal;
+        let prepared = prepare_request(client, target, run_id, options, dictionary, request)?;
+        schedule.push(ready_at_ns, ordinal, prepared);
+    }
+    Ok(schedule)
+}
+
+fn prepare_request(
+    client: &reqwest::Client,
+    target: &str,
+    run_id: &str,
+    options: &ReplayOptions,
+    dictionary: &TokenDictionary,
+    request: TraceRequest,
+) -> Result<PreparedRequest> {
+    let tokens = dictionary.synthesize(&request)?;
+    let replay_request_id = if options.preserve_request_ids {
+        request.source_request_id.clone()
+    } else {
+        format!("agent-loadgen-{run_id}-{}", request.ordinal)
+    };
+    let body = json!({
+        "model": options.model,
+        "messages": messages_for_trigger(
+            request
+                .agent_context
+                .as_ref()
+                .and_then(|agent_context| agent_context.input_trigger.as_deref())
+        ),
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "max_tokens": request.output_tokens,
+        "min_tokens": request.output_tokens,
+        "ignore_eos": true,
+        "temperature": 0.0,
+        "nvext": {"token_data": tokens}
+    });
+
+    let mut builder = client
+        .post(target)
+        .header("x-request-id", &replay_request_id)
+        .json(&body);
+    for (name, value) in &options.static_headers {
+        builder = builder.header(name, value);
+    }
+    for (name, value) in agent_headers(options.agent, request.agent_context.as_ref()) {
+        builder = builder.header(name, value);
+    }
+    let http_request = builder
+        .build()
+        .context("failed to build a replay request")?;
+    let metadata = PreparedMetadata {
+        ordinal: request.ordinal,
+        source_request_id: request.source_request_id,
+        source_x_request_id: request.source_x_request_id,
+        replay_request_id,
+        agent_context: request.agent_context,
+        input_tokens: request.input_tokens,
+        output_tokens: request.output_tokens,
+    };
+    Ok(PreparedRequest {
+        metadata,
+        http_request,
+    })
+}
+
+fn scaled_offset_ns(offset_ms: u64, time_scale: f64) -> Result<u64> {
+    let scaled = offset_ms as f64 * 1_000_000.0 / time_scale;
+    if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
+        bail!("scaled replay timestamp is outside the u64 nanosecond range");
+    }
+    Ok(scaled.round_ties_even() as u64)
+}
+
+async fn warm_connections(
+    client: &reqwest::Client,
+    target: &str,
+    options: &ReplayOptions,
+) -> Result<()> {
+    if options.warmup_connections == 0 {
+        return Ok(());
+    }
+    let models_target = target
+        .strip_suffix("/v1/chat/completions")
+        .map_or_else(|| target.to_string(), |base| format!("{base}/v1/models"));
+    let mut tasks = JoinSet::new();
+    for _ in 0..options.warmup_connections {
+        let client = client.clone();
+        let target = models_target.clone();
+        let headers = options.static_headers.clone();
+        tasks.spawn(async move {
+            let mut request = client.get(target);
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            let response = request.send().await.context("connection warmup failed")?;
+            response
+                .bytes()
+                .await
+                .context("failed to drain a connection warmup response")?;
+            Ok::<(), anyhow::Error>(())
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.context("a connection warmup task failed")??;
+    }
+    Ok(())
+}
+
 fn validate_options(options: &ReplayOptions) -> Result<()> {
     if options.model.trim().is_empty() {
         bail!("model must not be empty");
     }
     if options.max_in_flight == 0 {
         bail!("max_in_flight must be greater than zero");
+    }
+    if options.warmup_connections > options.max_in_flight {
+        bail!("warmup_connections must not exceed max_in_flight");
     }
     if !options.time_scale.is_finite() || options.time_scale <= 0.0 {
         bail!("time_scale must be a positive finite number");
@@ -200,68 +372,43 @@ fn validate_options(options: &ReplayOptions) -> Result<()> {
 async fn send_request(
     context: &ReplayContext,
     scheduled: Instant,
-    request: TraceRequest,
+    scheduler_wake: Instant,
+    scheduled_offset_ns: u64,
+    prepared: PreparedRequest,
 ) -> Result<RequestResult> {
-    let tokens = context.dictionary.synthesize(&request)?;
-    let replay_request_id = if context.options.preserve_request_ids {
-        request.source_request_id.clone()
-    } else {
-        format!("agent-loadgen-{}-{}", context.run_id, request.ordinal)
-    };
-    let body = json!({
-        "model": context.options.model,
-        "messages": messages_for_trigger(
-            request
-                .agent_context
-                .as_ref()
-                .and_then(|agent_context| agent_context.input_trigger.as_deref())
-        ),
-        "stream": true,
-        "stream_options": {"include_usage": true},
-        "max_tokens": request.output_tokens,
-        "min_tokens": request.output_tokens,
-        "ignore_eos": true,
-        "temperature": 0.0,
-        "nvext": {"token_data": tokens}
-    });
-
     let dispatch = Instant::now();
-    let mut builder = context
-        .client
-        .post(&context.target)
-        .header("x-request-id", &replay_request_id)
-        .json(&body);
-    for (name, value) in &context.options.static_headers {
-        builder = builder.header(name, value);
-    }
-    for (name, value) in agent_headers(context.options.agent, request.agent_context.as_ref()) {
-        builder = builder.header(name, value);
-    }
-
-    let response = builder.send().await;
-    let dispatch_offset_ms = millis(dispatch.duration_since(context.base));
+    let response = context.client.execute(prepared.http_request).await;
+    let dispatch_offset_ms = millis(dispatch.saturating_duration_since(context.base));
     let dispatch_lag_ms = millis(dispatch.saturating_duration_since(scheduled));
-    let session_id = request
+    let scheduler_wake_offset_ms = millis(scheduler_wake.saturating_duration_since(context.base));
+    let scheduler_wake_lag_ms = millis(scheduler_wake.saturating_duration_since(scheduled));
+    let local_admission_lag_ms = millis(dispatch.saturating_duration_since(scheduler_wake));
+    let session_id = prepared
+        .metadata
         .agent_context
         .as_ref()
         .map(|context| context.session_id.clone());
-    let parent_session_id = request
+    let parent_session_id = prepared
+        .metadata
         .agent_context
         .as_ref()
         .and_then(|context| context.parent_session_id.clone());
 
     let mut result = RequestResult {
-        ordinal: request.ordinal,
-        source_request_id: request.source_request_id,
-        source_x_request_id: request.source_x_request_id,
-        replay_request_id,
+        ordinal: prepared.metadata.ordinal,
+        source_request_id: prepared.metadata.source_request_id,
+        source_x_request_id: prepared.metadata.source_x_request_id,
+        replay_request_id: prepared.metadata.replay_request_id,
         session_id,
         parent_session_id,
-        scheduled_offset_ms: millis(scheduled.duration_since(context.base)),
+        scheduled_offset_ms: scheduled_offset_ns as f64 / 1_000_000.0,
+        scheduler_wake_offset_ms,
+        scheduler_wake_lag_ms,
         dispatch_offset_ms,
         dispatch_lag_ms,
-        expected_input_tokens: request.input_tokens,
-        expected_output_tokens: request.output_tokens,
+        local_admission_lag_ms,
+        expected_input_tokens: prepared.metadata.input_tokens,
+        expected_output_tokens: prepared.metadata.output_tokens,
         observed_output_tokens: None,
         output_length_match: None,
         status_code: None,
@@ -300,7 +447,7 @@ async fn send_request(
             result.observed_output_tokens = stream.output_tokens;
             result.output_length_match = stream
                 .output_tokens
-                .map(|tokens| tokens == request.output_tokens as u64);
+                .map(|tokens| tokens == prepared.metadata.output_tokens as u64);
         }
         Err(error) => result.error = Some(error.to_string()),
     }
@@ -309,10 +456,22 @@ async fn send_request(
 
 fn messages_for_trigger(input_trigger: Option<&str>) -> serde_json::Value {
     match input_trigger {
-        Some("tool_result") => json!([{
-            "role": "user",
-            "content": "shape replay"
-        }]),
+        Some("tool_result") => json!([
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "agent-loadgen-shape-tool",
+                    "type": "function",
+                    "function": {"name": "shape_tool", "arguments": "{}"}
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "agent-loadgen-shape-tool",
+                "content": "shape replay"
+            }
+        ]),
         Some("other") => json!([{"role": "assistant", "content": "shape replay"}]),
         _ => json!([{"role": "user", "content": "shape replay"}]),
     }
@@ -460,6 +619,14 @@ fn summarize(
         .iter()
         .map(|result| result.dispatch_lag_ms)
         .collect::<Vec<_>>();
+    let wake_lags = results
+        .iter()
+        .map(|result| result.scheduler_wake_lag_ms)
+        .collect::<Vec<_>>();
+    let admission_lags = results
+        .iter()
+        .map(|result| result.local_admission_lag_ms)
+        .collect::<Vec<_>>();
 
     RunSummary {
         run_id,
@@ -468,6 +635,8 @@ fn summarize(
         target: target.to_string(),
         time_scale: options.time_scale,
         max_in_flight: options.max_in_flight,
+        warmup_connections: options.warmup_connections,
+        timer_backend: TIMER_BACKEND,
         static_header_names: options
             .static_headers
             .iter()
@@ -481,7 +650,9 @@ fn summarize(
         output_length_matches,
         output_length_mismatches,
         missing_output_usage,
+        scheduler_wake_lag_ms: percentiles(wake_lags),
         dispatch_lag_ms: percentiles(lags),
+        local_admission_lag_ms: percentiles(admission_lags),
         total_time_ms: millis(elapsed),
     }
 }
@@ -501,7 +672,8 @@ pub(crate) fn percentiles(mut values: Vec<f64>) -> Percentiles {
 }
 
 fn percentile(values: &[f64], quantile: f64) -> f64 {
-    let index = ((values.len() - 1) as f64 * quantile).ceil() as usize;
+    let rank = (values.len() as f64 * quantile).ceil() as usize;
+    let index = rank.saturating_sub(1).min(values.len() - 1);
     values[index]
 }
 
@@ -540,6 +712,10 @@ fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -571,9 +747,9 @@ mod tests {
     fn calculates_nearest_rank_percentiles() {
         let values = (1..=100).map(|value| value as f64).collect();
         let result = percentiles(values);
-        assert_eq!(result.p50, 51.0);
-        assert_eq!(result.p95, 96.0);
-        assert_eq!(result.p99, 100.0);
+        assert_eq!(result.p50, 50.0);
+        assert_eq!(result.p95, 95.0);
+        assert_eq!(result.p99, 99.0);
     }
 
     #[test]
@@ -663,6 +839,7 @@ mod tests {
                 target: format!("http://{address}"),
                 output_dir: output.path().to_path_buf(),
                 max_in_flight: 1,
+                warmup_connections: 0,
                 start_delay: Duration::from_millis(5),
                 timeout: Duration::from_secs(5),
                 time_scale: 1.0,
@@ -695,10 +872,99 @@ mod tests {
         assert_eq!(body["max_tokens"], 2);
         assert_eq!(body["min_tokens"], 2);
         assert_eq!(body["ignore_eos"], true);
-        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["role"], "assistant");
+        assert_eq!(body["messages"][1]["role"], "tool");
+        assert_eq!(
+            body["messages"][1]["tool_call_id"],
+            "agent-loadgen-shape-tool"
+        );
         assert_eq!(body["nvext"]["token_data"].as_array().unwrap().len(), 3);
         assert!(output.path().join("run.json").is_file());
         assert!(output.path().join("requests.jsonl").is_file());
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn recorded_scheduler_handles_tied_millisecond_arrivals() {
+        let capture = Capture::default();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(shape_endpoint))
+            .with_state(capture);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let requests = (0..96)
+            .map(|ordinal| TraceRequest {
+                ordinal,
+                source_request_id: format!("source-{ordinal}"),
+                source_x_request_id: None,
+                source_model: None,
+                input_tokens: 3,
+                output_tokens: 2,
+                request_received_ms: 1_000 + (ordinal / 3) as u64,
+                trace_block_size: 2,
+                input_sequence_hashes: vec![11, 22],
+                agent_context: Some(AgentContext {
+                    session_id: format!("thread-{}", ordinal % 12),
+                    parent_session_id: None,
+                    session_final: None,
+                    compaction: None,
+                    input_trigger: Some("user_message".to_string()),
+                }),
+            })
+            .collect::<Vec<_>>();
+        let dictionary =
+            TokenDictionary::build(&requests, SafeTokenAlphabet::new(100, 16).unwrap()).unwrap();
+        let trace = LoadedTrace {
+            requests,
+            manifest: TraceManifest {
+                request_count: 96,
+                zero_output_requests: 0,
+                session_count: 12,
+                requests_with_agent_context: 96,
+                first_request_received_ms: 1_000,
+                last_request_received_ms: 1_031,
+                duration_ms: 31,
+                input_tokens: 288,
+                output_tokens: 192,
+                distinct_sequence_hashes: 2,
+                trace_block_size: 2,
+                source_digest_sha256: "source".to_string(),
+            },
+        };
+        let output = tempdir().unwrap();
+        let summary = run_replay(
+            trace,
+            dictionary,
+            ReplayOptions {
+                agent: AgentKind::Codex,
+                model: "test-model".to_string(),
+                target: format!("http://{address}"),
+                output_dir: output.path().to_path_buf(),
+                max_in_flight: 96,
+                warmup_connections: 0,
+                start_delay: Duration::from_millis(25),
+                timeout: Duration::from_secs(5),
+                time_scale: 1.0,
+                preserve_request_ids: false,
+                static_headers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.succeeded, 96);
+        assert_eq!(summary.output_length_matches, 96);
+        assert!(summary.scheduler_wake_lag_ms.p99 < 100.0);
+        assert!(summary.dispatch_lag_ms.p99 < 100.0);
+        server.abort();
+    }
+
+    #[test]
+    fn scaled_offsets_use_integer_nanoseconds() {
+        assert_eq!(scaled_offset_ns(1, 1.0).unwrap(), 1_000_000);
+        assert_eq!(scaled_offset_ns(1, 2.0).unwrap(), 500_000);
+        assert_eq!(scaled_offset_ns(1, 3.0).unwrap(), 333_333);
     }
 }
