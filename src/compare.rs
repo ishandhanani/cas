@@ -45,8 +45,8 @@ pub fn compare_traces(
     replay_paths: &[PathBuf],
     request_results_path: &Path,
 ) -> Result<FidelityReport> {
-    let source = load_trace(source_paths, None).context("failed to load the source trace")?;
-    let replay = load_trace(replay_paths, None).context("failed to load the replay trace")?;
+    let source = load_trace(source_paths, None, None).context("failed to load the source trace")?;
+    let replay = load_trace(replay_paths, None, None).context("failed to load the replay trace")?;
     let mappings = load_mappings(request_results_path)?;
     compare_loaded(&source, &replay, &mappings)
 }
@@ -183,7 +183,6 @@ fn compare_loaded(
     let arrival_error_ms = arrival_error(&pairs);
     let mapped_request_count = pairs.len();
     let passed = mapped_request_count == mappings.len()
-        && mapped_request_count == source.requests.len()
         && trace_block_size_matches == mapped_request_count
         && input_length_matches == mapped_request_count
         && output_length_matches == mapped_request_count

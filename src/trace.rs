@@ -93,7 +93,11 @@ pub struct LoadedTrace {
     pub manifest: TraceManifest,
 }
 
-pub fn load_trace(paths: &[PathBuf], max_requests: Option<usize>) -> Result<LoadedTrace> {
+pub fn load_trace(
+    paths: &[PathBuf],
+    max_requests: Option<usize>,
+    session_id: Option<&str>,
+) -> Result<LoadedTrace> {
     if paths.is_empty() {
         bail!("at least one trace path is required");
     }
@@ -108,6 +112,17 @@ pub fn load_trace(paths: &[PathBuf], max_requests: Option<usize>) -> Result<Load
     }
 
     requests.sort_by_key(|request| (request.request_received_ms, request.ordinal));
+    if let Some(session_id) = session_id {
+        requests.retain(|request| {
+            request
+                .agent_context
+                .as_ref()
+                .is_some_and(|context| context.session_id == session_id)
+        });
+        if requests.is_empty() {
+            bail!("the trace contains no requests for session {session_id:?}");
+        }
+    }
     if let Some(limit) = max_requests {
         requests.truncate(limit);
     }
@@ -329,7 +344,7 @@ mod tests {
         }});
         writeln!(file, "{}", wrapped).unwrap();
 
-        let trace = load_trace(&[file.path().to_path_buf()], None).unwrap();
+        let trace = load_trace(&[file.path().to_path_buf()], None, None).unwrap();
         assert_eq!(trace.manifest.request_count, 2);
         assert_eq!(trace.manifest.duration_ms, 25);
         assert_eq!(trace.manifest.distinct_sequence_hashes, 3);

@@ -30,6 +30,10 @@ enum Command {
         #[arg(long)]
         max_requests: Option<usize>,
 
+        /// Replay only one agent session.
+        #[arg(long)]
+        session_id: Option<String>,
+
         /// First valid synthetic token ID.
         #[arg(long, default_value_t = 1000)]
         token_start: u32,
@@ -64,6 +68,10 @@ enum Command {
         /// Stop after this many requests.
         #[arg(long)]
         max_requests: Option<usize>,
+
+        /// Replay only one agent session.
+        #[arg(long)]
+        session_id: Option<String>,
 
         /// First valid synthetic token ID.
         #[arg(long, default_value_t = 1000)]
@@ -121,10 +129,11 @@ async fn main() -> Result<()> {
         Command::Inspect {
             trace,
             max_requests,
+            session_id,
             token_start,
             token_alphabet_size,
         } => {
-            let trace = load_trace(&trace, max_requests)?;
+            let trace = load_trace(&trace, max_requests, session_id.as_deref())?;
             let dictionary = TokenDictionary::build(
                 &trace.requests,
                 SafeTokenAlphabet::new(token_start, token_alphabet_size)?,
@@ -143,6 +152,7 @@ async fn main() -> Result<()> {
             target,
             output,
             max_requests,
+            session_id,
             token_start,
             token_alphabet_size,
             max_in_flight,
@@ -152,7 +162,7 @@ async fn main() -> Result<()> {
             preserve_request_ids,
             headers,
         } => {
-            let trace = load_trace(&trace, max_requests)?;
+            let trace = load_trace(&trace, max_requests, session_id.as_deref())?;
             let dictionary = TokenDictionary::build(
                 &trace.requests,
                 SafeTokenAlphabet::new(token_start, token_alphabet_size)?,

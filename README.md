@@ -26,6 +26,8 @@ cargo build --release
 agent-loadgen inspect trace.jsonl.gz
 ```
 
+Use `--session-id ID` to inspect or replay one agent session from a combined trace.
+
 ## Replay a trace
 
 ```bash
