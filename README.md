@@ -53,6 +53,8 @@ The default timing mode never retimes late requests. The run is invalid when loc
 
 Shape-strict replay requires `--max-in-flight` to be at least the selected request count so response speed cannot hold back a recorded arrival. On Unix, the process raises its soft open-file limit to support the requested capacity or fails before network traffic starts.
 
+`--serialize-sessions` waits for each previous response in the same session. It is useful as a causal workload transformation, but it does not claim recorded-arrival timing fidelity.
+
 ## Compare traces
 
 Enable Dynamo request tracing during replay. Then compare the captured trace with the source trace.

@@ -30,6 +30,7 @@ pub struct ReplayOptions {
     pub output_dir: PathBuf,
     pub max_in_flight: usize,
     pub warmup_connections: usize,
+    pub serialize_sessions: bool,
     pub start_delay: Duration,
     pub timeout: Duration,
     pub time_scale: f64,
@@ -71,6 +72,7 @@ pub struct RunSummary {
     pub time_scale: f64,
     pub max_in_flight: usize,
     pub warmup_connections: usize,
+    pub serialize_sessions: bool,
     pub timer_backend: &'static str,
     pub static_header_names: Vec<String>,
     pub source: TraceManifest,
@@ -248,13 +250,17 @@ fn prepare_schedule(
             options.time_scale,
         )?;
         let ordinal = request.ordinal;
-        let session_gate = request.agent_context.as_ref().map(|context| {
-            Arc::clone(
-                session_gates
-                    .entry(context.session_id.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
-        });
+        let session_gate = if options.serialize_sessions {
+            request.agent_context.as_ref().map(|context| {
+                Arc::clone(
+                    session_gates
+                        .entry(context.session_id.clone())
+                        .or_insert_with(|| Arc::new(Mutex::new(()))),
+                )
+            })
+        } else {
+            None
+        };
         let prepared = prepare_request(
             client,
             target,
@@ -709,6 +715,7 @@ fn summarize(
         time_scale: options.time_scale,
         max_in_flight: options.max_in_flight,
         warmup_connections: options.warmup_connections,
+        serialize_sessions: options.serialize_sessions,
         timer_backend: TIMER_BACKEND,
         static_header_names: options
             .static_headers
@@ -913,6 +920,7 @@ mod tests {
                 output_dir: output.path().to_path_buf(),
                 max_in_flight: 1,
                 warmup_connections: 0,
+                serialize_sessions: false,
                 start_delay: Duration::from_millis(5),
                 timeout: Duration::from_secs(5),
                 time_scale: 1.0,
@@ -1017,6 +1025,7 @@ mod tests {
                 output_dir: output.path().to_path_buf(),
                 max_in_flight: 96,
                 warmup_connections: 0,
+                serialize_sessions: false,
                 start_delay: Duration::from_millis(25),
                 timeout: Duration::from_secs(5),
                 time_scale: 1.0,

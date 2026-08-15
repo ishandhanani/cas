@@ -89,6 +89,10 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         warmup_connections: usize,
 
+        /// Wait for each prior same-session response. This transforms recorded timing.
+        #[arg(long)]
+        serialize_sessions: bool,
+
         /// Delay before the first scheduled request.
         #[arg(long, default_value_t = 100)]
         start_delay_ms: u64,
@@ -161,6 +165,7 @@ async fn main() -> Result<()> {
             token_alphabet_size,
             max_in_flight,
             warmup_connections,
+            serialize_sessions,
             start_delay_ms,
             timeout_seconds,
             time_scale,
@@ -182,6 +187,7 @@ async fn main() -> Result<()> {
                     output_dir: output,
                     max_in_flight,
                     warmup_connections,
+                    serialize_sessions,
                     start_delay: Duration::from_millis(start_delay_ms),
                     timeout: Duration::from_secs(timeout_seconds),
                     time_scale,
