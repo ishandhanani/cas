@@ -1,0 +1,134 @@
+# Generator configuration
+
+Generator profiles are strict, versioned TOML. Unknown fields and unsupported schema versions fail during planning. `scenario.json` contains the fully resolved configuration, so a run does not depend on hidden defaults after planning.
+
+## Execution model
+
+```text
+active-agent slot -> root task -> model request
+                                  |
+                                  +--text----------think delay------> next request
+                                  +--tool----------tool latency-----> next request
+                                  +--parallel tools-max latency-----> next request
+                                  +--subagent------child completion-> parent join
+                                  +--swarm---------all children-----> parent join
+                                  +--background----independent request
+                                  +--complete-----------------------> next root task in slot
+```
+
+Generated traffic is closed-loop. The first task in each active-agent slot starts during the configured ramp-up. Every later request becomes ready only after all graph dependencies complete, plus its sampled virtual delay. When a root task completes, that slot releases its next root task after `restart_delay_ms`. Target response latency therefore controls the generated request rate. The scheduler can still run independent slots, tools, background requests, and sibling subagents concurrently. A blocking child or swarm joins the parent; a non-blocking child continues independently.
+
+The generator does not execute tools or generate meaningful text. Tool classes sample delay, result-token geometry, failure, and retry behavior. Those sampled outcomes and direct child-session IDs are recorded on their originating node in `scenario.json`.
+
+## Minimal profile
+
+```toml
+schema_version = 1
+agent = "codex"
+seed = 42
+
+[load]
+root_sessions = 16
+concurrent_agents = 8
+startup_interval_ms = 0
+restart_delay_ms = { kind = "fixed", value = 0 }
+```
+
+`agent` selects the `claude-code`, `codex`, or `opencode` structural preset. Every remaining field is an optional override. See `profiles/codex-balanced.toml` for a profile that spells out the complete surface.
+
+## Distributions
+
+Token sizes, turn counts, and delays accept one of these forms:
+
+```toml
+value = { kind = "fixed", value = 8 }
+value = { kind = "uniform", min = 4, max = 12 }
+value = { kind = "log_normal", median = 450.0, sigma = 0.9, min = 16, max = 4096 }
+```
+
+All sampling uses the profile seed. Log-normal samples are rounded and clamped to the configured inclusive bounds.
+
+## Load
+
+- `load.root_sessions`: total root tasks in the finite generated run.
+- `load.concurrent_agents`: number of closed-loop root-agent slots. It must not exceed `root_sessions`.
+- `load.startup_interval_ms`: spacing between the first task in each slot; zero starts the full population together.
+- `load.restart_delay_ms`: sampled idle delay between a completed root task and its slot's next task.
+
+For example, `root_sessions = 100` and `concurrent_agents = 10` runs ten active root agents, each processing ten tasks. With a zero restart delay, every slot replaces a completed task immediately. Subagents and background work can temporarily push live request concurrency above ten.
+
+## Trajectory and token shape
+
+- `trajectory.turns`: maximum foreground model turns per root session.
+- `trajectory.think_time_ms`: delay after a sampled text response.
+- `trajectory.output_tokens`: requested output length.
+- `tokens.block_size`: generated KV block size and token-segment quantization.
+- `tokens.system_prefix_tokens`: global prefix shared by every session.
+- `tokens.tool_catalog_tokens`: global tool-definition prefix shared by every session.
+- `tokens.repository_tokens`: prefix shared by one root and all of its descendants.
+- `tokens.session_tokens`: environment/instruction prefix unique to a session.
+- `tokens.user_tokens`: appended user-message size.
+- `tokens.tool_result_tokens`: appended parent join-result size after child agents.
+- `tokens.context_window_tokens`: compaction threshold basis.
+
+The configured token sizes are rounded up to complete KV blocks. This keeps prefix construction simple and deterministic while preserving the intended cache geometry.
+
+## Behavior
+
+- `behavior.tool_probability`: one external tool call.
+- `behavior.parallel_tool_probability`: two or more concurrent external tool calls represented by their maximum latency.
+- `behavior.subagent_probability`: one child session.
+- `behavior.swarm_probability`: sampled child fanout.
+- `behavior.completion_probability`: early completion after the minimum trajectory prefix.
+- `behavior.background_request_probability`: an independent request released from the current turn.
+
+The first five probabilities must sum to at most 1.0. Remaining probability becomes a text/user turn. The last configured turn is always a completion so every non-truncated session terminates.
+
+## Tool classes
+
+`tools.classes` replaces the preset list. Weights are relative and do not need to sum to one. Each selected class samples latency and result size, then independently samples `error_probability`. `tools.retry_probability` controls whether a failed call adds one more latency and result sample. `tools.parallel_count` controls tool fanout for a parallel action.
+
+```toml
+[tools]
+parallel_count = { kind = "uniform", min = 2, max = 4 }
+retry_probability = 0.35
+
+[[tools.classes]]
+name = "shell"
+weight = 0.5
+latency_ms = { kind = "log_normal", median = 600.0, sigma = 1.0, min = 100, max = 2500 }
+result_tokens = { kind = "log_normal", median = 1200.0, sigma = 1.1, min = 64, max = 8000 }
+error_probability = 0.08
+```
+
+## Compaction
+
+- `compaction.enabled`: enables context-window compaction.
+- `compaction.trigger_fraction`: fraction of `context_window_tokens` that triggers compaction before the next turn.
+- `compaction.summary_input_tokens`: synthetic compaction-instruction tokens added to the compaction request.
+- `compaction.summary_output_tokens`: summary output length and summary size retained in the next context window.
+- `compaction.retained_recent_tokens`: recent non-stable context retained beside the summary.
+
+Global, tool-catalog, repository, and session-environment blocks remain stable across compaction. The context window epoch and compaction metadata are recorded in the plan. Codex compaction nodes also emit `x-codex-turn-metadata` during execution. Current Dynamo frontends treat that header as opaque and do not copy it into request-trace `AgentContext`; captured-trace validation therefore gates the resulting KV topology and reports the unavailable metadata as a warning.
+
+## Subagents and swarms
+
+- `subagents.max_depth`: maximum recursive child depth.
+- `subagents.turns`: foreground turns per child.
+- `subagents.fanout`: child count for a swarm.
+- `subagents.spawn_delay_ms`: delay between parent completion and child readiness, and the synthetic join delay.
+- `subagents.blocking_probability`: probability that the parent next turn depends on every child completion.
+
+Children inherit the global and root-repository prefixes, receive a unique session prefix, and send parent/session headers for the selected agent adapter.
+
+## Safety limits
+
+- `limits.max_nodes`: hard bound on model requests in the materialized graph.
+- `limits.max_sessions`: hard bound on root and child sessions.
+- `limits.max_total_input_tokens`: hard bound on the sum of request input lengths.
+
+Planning fails when a hard limit is exceeded. These limits bound generated-plan memory; they do not cap live HTTP concurrency, which is controlled by `--max-in-flight`.
+
+## Reproducibility
+
+The plan records a resolved-profile SHA-256 digest and a scenario SHA-256 digest. Given the same binary behavior and config, the same seed produces the same sessions, graph, token labels, and samples. Runtime request IDs and measured timing are intentionally run-specific.

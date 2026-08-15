@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -8,19 +8,32 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use futures_util::StreamExt;
+use hdrhistogram::Histogram;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::json;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::{AgentKind, agent_headers};
 use crate::clock::{TIMER_BACKEND, sleep_until};
+use crate::scenario::GeneratedScenario;
 use crate::scheduler::ReadyQueue;
 use crate::token_shape::{TokenDictionary, TokenDictionaryManifest};
-use crate::trace::{AgentContext, LoadedTrace, TraceManifest, TraceRequest};
+use crate::trace::{
+    AgentContext, LoadedTrace, StoredTrace, StoredTraceReader, TraceManifest, TraceRequest,
+    TraceStorageManifest,
+};
+
+#[derive(Debug, Clone, Copy, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum HttpTransport {
+    Auto,
+    Http2PriorKnowledge,
+}
 
 #[derive(Debug, Clone)]
 pub struct ReplayOptions {
@@ -30,6 +43,9 @@ pub struct ReplayOptions {
     pub output_dir: PathBuf,
     pub max_in_flight: usize,
     pub warmup_connections: usize,
+    pub http_transport: HttpTransport,
+    pub prepare_lookahead: Duration,
+    pub result_flush_interval: usize,
     pub serialize_sessions: bool,
     pub max_dispatch_p99_ms: f64,
     pub max_dispatch_max_ms: f64,
@@ -67,6 +83,7 @@ pub struct RequestResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunSummary {
+    pub workload_kind: &'static str,
     pub run_id: String,
     pub agent: AgentKind,
     pub model: String,
@@ -74,12 +91,16 @@ pub struct RunSummary {
     pub time_scale: f64,
     pub max_in_flight: usize,
     pub warmup_connections: usize,
+    pub http_transport: HttpTransport,
+    pub prepare_lookahead_ms: u64,
+    pub result_flush_interval: usize,
     pub serialize_sessions: bool,
     pub max_dispatch_p99_ms: f64,
     pub max_dispatch_max_ms: f64,
     pub timer_backend: &'static str,
     pub static_header_names: Vec<String>,
     pub source: TraceManifest,
+    pub source_storage: Option<TraceStorageManifest>,
     pub token_dictionary: TokenDictionaryManifest,
     pub request_count: usize,
     pub succeeded: usize,
@@ -134,20 +155,75 @@ struct PreparedMetadata {
     request_received_ms: u64,
 }
 
+trait RequestStream {
+    fn next_request(&mut self) -> Result<Option<TraceRequest>>;
+}
+
+struct MemoryRequestStream {
+    requests: std::vec::IntoIter<TraceRequest>,
+}
+
+impl RequestStream for MemoryRequestStream {
+    fn next_request(&mut self) -> Result<Option<TraceRequest>> {
+        Ok(self.requests.next())
+    }
+}
+
+impl RequestStream for StoredTraceReader {
+    fn next_request(&mut self) -> Result<Option<TraceRequest>> {
+        StoredTraceReader::next_request(self)
+    }
+}
+
 pub async fn run_replay(
     trace: LoadedTrace,
     dictionary: TokenDictionary,
     options: ReplayOptions,
 ) -> Result<RunSummary> {
+    let LoadedTrace { requests, manifest } = trace;
+    run_replay_stream(
+        Box::new(MemoryRequestStream {
+            requests: requests.into_iter(),
+        }),
+        manifest,
+        None,
+        dictionary,
+        options,
+    )
+    .await
+}
+
+pub async fn run_stored_replay(
+    trace: StoredTrace,
+    dictionary: TokenDictionary,
+    options: ReplayOptions,
+) -> Result<RunSummary> {
+    let manifest = trace.manifest.clone();
+    let storage = trace.storage.clone();
+    let reader = trace.reader();
+    run_replay_stream(
+        Box::new(reader),
+        manifest,
+        Some(storage),
+        dictionary,
+        options,
+    )
+    .await
+}
+
+async fn run_replay_stream(
+    mut requests: Box<dyn RequestStream>,
+    source_manifest: TraceManifest,
+    source_storage: Option<TraceStorageManifest>,
+    dictionary: TokenDictionary,
+    options: ReplayOptions,
+) -> Result<RunSummary> {
     validate_options(&options)?;
-    if trace.manifest.zero_output_requests > 0 {
+    if source_manifest.zero_output_requests > 0 {
         bail!(
             "shape-strict replay does not support {} zero-output requests",
-            trace.manifest.zero_output_requests
+            source_manifest.zero_output_requests
         );
-    }
-    if !options.serialize_sessions {
-        validate_recorded_capacity(trace.manifest.request_count, options.max_in_flight)?;
     }
     prepare_open_file_limit(options.max_in_flight)?;
     fs::create_dir_all(&options.output_dir).with_context(|| {
@@ -157,27 +233,27 @@ pub async fn run_replay(
         )
     })?;
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(options.timeout.min(Duration::from_secs(30)))
-        .timeout(options.timeout)
-        .pool_max_idle_per_host(options.max_in_flight)
-        .build()
-        .context("failed to build the HTTP client")?;
+    let client = build_http_client(&options)?;
     let target = normalize_target(&options.target);
     let run_id = Uuid::new_v4().to_string();
-    let LoadedTrace {
-        requests,
-        manifest: source_manifest,
-    } = trace;
     let token_manifest = dictionary.manifest().clone();
-    let mut schedule = prepare_schedule(
-        requests,
-        &dictionary,
-        &client,
-        &target,
-        &run_id,
-        &options,
-        source_manifest.first_request_received_ms,
+    let mut pending = requests.next_request()?;
+    let mut schedule = VecDeque::<(u64, PreparedRequest)>::new();
+    let mut session_gates = HashMap::<String, Arc<Mutex<SessionGate>>>::new();
+    ReplayPreparationContext {
+        dictionary: &dictionary,
+        client: &client,
+        target: &target,
+        run_id: &run_id,
+        options: &options,
+        first_received_ms: source_manifest.first_request_received_ms,
+    }
+    .fill_queue(
+        &mut *requests,
+        &mut pending,
+        &mut schedule,
+        &mut session_gates,
+        duration_ns(options.prepare_lookahead),
     )?;
     warm_connections(&client, &target, &options).await?;
 
@@ -189,132 +265,470 @@ pub async fn run_replay(
     let options = Arc::new(options);
     let context = ReplayContext { client, base };
     let mut tasks = JoinSet::new();
+    let mut sink = ResultSink::create(
+        &options.output_dir.join("requests.jsonl"),
+        options.result_flush_interval,
+        options.max_dispatch_p99_ms,
+    )?;
 
-    while let Some(next_ready_ns) = schedule.next_ready_at_ns() {
-        let deadline = base
-            .checked_add(Duration::from_nanos(next_ready_ns))
-            .context("a replay timestamp exceeds the monotonic clock range")?;
-        sleep_until(deadline).await;
+    while pending.is_some() || !schedule.is_empty() || !tasks.is_empty() {
+        while let Some(result) = tasks.try_join_next() {
+            sink.record(result.context("a replay task failed")??)?;
+        }
 
         let now_ns = duration_ns(Instant::now().saturating_duration_since(base));
-        let due = schedule.pop_due(now_ns, usize::MAX);
-        for ready in due {
+        let prepare_horizon_ns = now_ns.saturating_add(duration_ns(options.prepare_lookahead));
+        ReplayPreparationContext {
+            dictionary: &dictionary,
+            client: &context.client,
+            target: &target,
+            run_id: &run_id,
+            options: &options,
+            first_received_ms: source_manifest.first_request_received_ms,
+        }
+        .fill_queue(
+            &mut *requests,
+            &mut pending,
+            &mut schedule,
+            &mut session_gates,
+            prepare_horizon_ns,
+        )?;
+
+        let mut dispatched = false;
+        while schedule.front().is_some_and(|(ready_at_ns, _)| {
+            base.checked_add(Duration::from_nanos(*ready_at_ns))
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        }) {
+            let (ready_at_ns, prepared) = schedule.pop_front().expect("a due request exists");
             let scheduler_wake = Instant::now();
             let scheduled = base
-                .checked_add(Duration::from_nanos(ready.ready_at_ns))
+                .checked_add(Duration::from_nanos(ready_at_ns))
                 .expect("the deadline was validated before queue release");
             let context = context.clone();
-            let semaphore = Arc::clone(&semaphore);
-            let session_gate = ready.value.session_gate.clone();
-            let request_received_ms = ready.value.metadata.request_received_ms;
+            let task_semaphore = Arc::clone(&semaphore);
+            let session_gate = prepared.session_gate.clone();
+            let request_received_ms = prepared.metadata.request_received_ms;
             let time_scale = options.time_scale;
+            let permit = if options.serialize_sessions {
+                None
+            } else {
+                match Arc::clone(&semaphore).try_acquire_owned() {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        sink.record(admission_failure(
+                            &context,
+                            scheduled,
+                            scheduler_wake,
+                            ready_at_ns,
+                            prepared,
+                            options.max_in_flight,
+                        ))?;
+                        continue;
+                    }
+                }
+            };
             tasks.spawn(async move {
                 let mut session_guard = match session_gate {
                     Some(gate) => Some(gate.lock_owned().await),
                     None => None,
                 };
-                if let Some(gate) = session_guard.as_ref() {
-                    if let (Some(previous_received_ms), Some(previous_completed_at)) = (
-                        gate.last_request_received_ms,
-                        gate.last_completed_at,
-                    ) {
-                        let gap_ns = scaled_offset_ns(
-                            request_received_ms.saturating_sub(previous_received_ms),
-                            time_scale,
-                        )?;
-                        sleep_until(
-                            previous_completed_at
-                                .checked_add(Duration::from_nanos(gap_ns))
-                                .context("the session replay delay exceeds the monotonic clock range")?,
-                        )
-                        .await;
-                    }
+                if let Some(gate) = session_guard.as_ref()
+                    && let (Some(previous_received_ms), Some(previous_completed_at)) =
+                        (gate.last_request_received_ms, gate.last_completed_at)
+                {
+                    let gap_ns = scaled_offset_ns(
+                        request_received_ms.saturating_sub(previous_received_ms),
+                        time_scale,
+                    )?;
+                    sleep_until(
+                        previous_completed_at
+                            .checked_add(Duration::from_nanos(gap_ns))
+                            .context(
+                                "the session replay delay exceeds the monotonic clock range",
+                            )?,
+                    )
+                    .await;
                 }
-                let permit = semaphore
-                    .acquire_owned()
-                    .await
-                    .context("the replay semaphore closed")?;
+                let permit = match permit {
+                    Some(permit) => permit,
+                    None => task_semaphore
+                        .acquire_owned()
+                        .await
+                        .context("the replay semaphore closed")?,
+                };
                 let result = send_request(
                     &context,
                     scheduled,
                     scheduler_wake,
-                    ready.ready_at_ns,
-                    ready.value,
+                    ready_at_ns,
+                    prepared,
+                    permit,
                 )
                 .await;
-                drop(permit);
                 if let Some(gate) = session_guard.as_mut() {
                     gate.last_request_received_ms = Some(request_received_ms);
                     gate.last_completed_at = Some(Instant::now());
                 }
                 result
             });
+            dispatched = true;
+        }
+
+        if dispatched {
+            continue;
+        }
+        let next_prepare_ns = pending
+            .as_ref()
+            .map(|request| {
+                scaled_offset_ns(
+                    request.request_received_ms - source_manifest.first_request_received_ms,
+                    options.time_scale,
+                )
+                .map(|ready_at_ns| {
+                    ready_at_ns.saturating_sub(duration_ns(options.prepare_lookahead))
+                })
+            })
+            .transpose()?;
+        let next_dispatch_ns = schedule.front().map(|(ready_at_ns, _)| *ready_at_ns);
+        let next_wake_ns = next_prepare_ns.into_iter().chain(next_dispatch_ns).min();
+        match (next_wake_ns, tasks.is_empty()) {
+            (Some(next_wake_ns), false) => {
+                let deadline = base
+                    .checked_add(Duration::from_nanos(next_wake_ns))
+                    .context("a replay timestamp exceeds the monotonic clock range")?;
+                tokio::select! {
+                    () = sleep_until(deadline) => {},
+                    result = tasks.join_next() => {
+                        if let Some(result) = result {
+                            sink.record(result.context("a replay task failed")??)?;
+                        }
+                    }
+                }
+            }
+            (Some(next_wake_ns), true) => {
+                let deadline = base
+                    .checked_add(Duration::from_nanos(next_wake_ns))
+                    .context("a replay timestamp exceeds the monotonic clock range")?;
+                sleep_until(deadline).await;
+            }
+            (None, false) => {
+                if let Some(result) = tasks.join_next().await {
+                    sink.record(result.context("a replay task failed")??)?;
+                }
+            }
+            (None, true) => break,
         }
     }
 
-    let mut results = Vec::with_capacity(source_manifest.request_count);
-    while let Some(result) = tasks.join_next().await {
-        results.push(result.context("a replay task failed")??);
-    }
-    results.sort_by_key(|result| result.ordinal);
-
-    write_request_results(&options.output_dir, &results)?;
+    sink.flush()?;
     let summary = summarize(
-        run_id,
-        &target,
+        SummaryIdentity {
+            workload_kind: "trace-replay",
+            run_id,
+            target: &target,
+            source_storage,
+        },
         &source_manifest,
         &token_manifest,
         &options,
-        &results,
+        &sink.accumulator,
         wall_started.elapsed(),
     );
     write_json(&options.output_dir.join("run.json"), &summary)?;
     Ok(summary)
 }
 
-fn prepare_schedule(
-    requests: Vec<TraceRequest>,
-    dictionary: &TokenDictionary,
-    client: &reqwest::Client,
-    target: &str,
-    run_id: &str,
-    options: &ReplayOptions,
-    first_received_ms: u64,
-) -> Result<ReadyQueue<PreparedRequest>> {
-    let mut schedule = ReadyQueue::with_capacity(requests.len());
-    let mut session_gates = HashMap::<String, Arc<Mutex<SessionGate>>>::new();
-    for request in requests {
-        let ready_at_ns = scaled_offset_ns(
-            request.request_received_ms - first_received_ms,
-            options.time_scale,
-        )?;
-        let ordinal = request.ordinal;
-        let session_gate = if options.serialize_sessions {
-            request.agent_context.as_ref().map(|context| {
-                let gate = context
-                    .parent_session_id
-                    .as_ref()
-                    .and_then(|parent| session_gates.get(parent))
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(Mutex::new(SessionGate::default())));
-                session_gates.insert(context.session_id.clone(), Arc::clone(&gate));
-                gate
-            })
-        } else {
-            None
-        };
-        let prepared = prepare_request(
-            client,
-            target,
-            run_id,
-            options,
-            dictionary,
-            request,
-            session_gate,
-        )?;
-        schedule.push(ready_at_ns, ordinal, prepared);
+pub async fn run_generated_scenario(
+    scenario: &GeneratedScenario,
+    dictionary: TokenDictionary,
+    options: ReplayOptions,
+) -> Result<RunSummary> {
+    validate_options(&options)?;
+    if options.serialize_sessions {
+        bail!("generated scenarios use graph dependencies and cannot use serialize_sessions");
     }
-    Ok(schedule)
+    if options.agent != scenario.config.agent {
+        bail!("generated scenario agent does not match the request header adapter");
+    }
+    prepare_open_file_limit(options.max_in_flight)?;
+    fs::create_dir_all(&options.output_dir).with_context(|| {
+        format!(
+            "failed to create output directory {}",
+            options.output_dir.display()
+        )
+    })?;
+    write_json(&options.output_dir.join("scenario.json"), scenario)?;
+
+    let client = build_http_client(&options)?;
+    let target = normalize_target(&options.target);
+    let run_id = Uuid::new_v4().to_string();
+    let token_manifest = dictionary.manifest().clone();
+    let mut prepared = scenario
+        .nodes
+        .iter()
+        .map(|node| {
+            prepare_request(
+                &client,
+                &target,
+                &run_id,
+                &options,
+                &dictionary,
+                node.request.clone(),
+                None,
+            )
+            .map(Some)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let remaining_dependencies = scenario
+        .nodes
+        .iter()
+        .map(|node| node.dependencies.len())
+        .collect::<Vec<_>>();
+    let mut successors = vec![Vec::new(); scenario.nodes.len()];
+    for (ordinal, node) in scenario.nodes.iter().enumerate() {
+        for dependency in &node.dependencies {
+            let outputs = successors
+                .get_mut(*dependency)
+                .with_context(|| format!("node {ordinal} has missing dependency {dependency}"))?;
+            outputs.push(ordinal);
+        }
+    }
+    let mut ready = ReadyQueue::with_capacity(scenario.nodes.len());
+    for (ordinal, node) in scenario.nodes.iter().enumerate() {
+        if node.dependencies.is_empty() {
+            let arrival_ms = node
+                .root_arrival_ms
+                .with_context(|| format!("root node {ordinal} has no root arrival"))?;
+            ready.push(
+                scaled_offset_ns(arrival_ms, options.time_scale)?,
+                ordinal,
+                ordinal,
+            );
+        } else if node.root_arrival_ms.is_some() {
+            bail!("dependent node {ordinal} also has a root arrival");
+        }
+    }
+    warm_connections(&client, &target, &options).await?;
+
+    let wall_started = Instant::now();
+    let base = wall_started
+        .checked_add(options.start_delay)
+        .context("generation start delay exceeds the monotonic clock range")?;
+    let context = ReplayContext { client, base };
+    let semaphore = Arc::new(Semaphore::new(options.max_in_flight));
+    let options = Arc::new(options);
+    let mut tasks = JoinSet::new();
+    let mut scheduler = GeneratedSchedulerState {
+        scenario,
+        successors,
+        remaining_dependencies,
+        dependency_completion_ns: vec![0; scenario.nodes.len()],
+        ready,
+        sink: ResultSink::create(
+            &options.output_dir.join("requests.jsonl"),
+            options.result_flush_interval,
+            options.max_dispatch_p99_ms,
+        )?,
+        base,
+        time_scale: options.time_scale,
+    };
+
+    while !scheduler.ready.is_empty() || !tasks.is_empty() {
+        if let Some(next_ready_ns) = scheduler.ready.next_ready_at_ns() {
+            let deadline = base
+                .checked_add(Duration::from_nanos(next_ready_ns))
+                .context("a generated timestamp exceeds the monotonic clock range")?;
+            if Instant::now() < deadline {
+                if tasks.is_empty() {
+                    sleep_until(deadline).await;
+                } else {
+                    tokio::select! {
+                        () = sleep_until(deadline) => {},
+                        result = tasks.join_next() => {
+                            if let Some(result) = result {
+                                scheduler.release(
+                                    result.context("a generated request task failed")??,
+                                )?;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            let now_ns = duration_ns(Instant::now().saturating_duration_since(base));
+            for item in scheduler.ready.pop_due(now_ns, usize::MAX) {
+                let ordinal = item.value;
+                let request = prepared
+                    .get_mut(ordinal)
+                    .and_then(Option::take)
+                    .with_context(|| format!("generated node {ordinal} was released twice"))?;
+                let scheduled = base
+                    .checked_add(Duration::from_nanos(item.ready_at_ns))
+                    .context("a generated timestamp exceeds the monotonic clock range")?;
+                let scheduler_wake = Instant::now();
+                let context = context.clone();
+                let semaphore = Arc::clone(&semaphore);
+                tasks.spawn(async move {
+                    let permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .context("the generated request semaphore closed")?;
+                    let result = send_request(
+                        &context,
+                        scheduled,
+                        scheduler_wake,
+                        item.ready_at_ns,
+                        request,
+                        permit,
+                    )
+                    .await?;
+                    Ok::<_, anyhow::Error>((ordinal, Instant::now(), result))
+                });
+            }
+        } else if let Some(result) = tasks.join_next().await {
+            scheduler.release(result.context("a generated request task failed")??)?;
+        }
+    }
+
+    scheduler.sink.flush()?;
+    if scheduler.sink.accumulator.request_count != scenario.nodes.len() {
+        bail!(
+            "generated graph stalled after {} of {} requests",
+            scheduler.sink.accumulator.request_count,
+            scenario.nodes.len()
+        );
+    }
+    let summary = summarize(
+        SummaryIdentity {
+            workload_kind: "generated-closed-loop",
+            run_id,
+            target: &target,
+            source_storage: None,
+        },
+        &scenario.trace_manifest,
+        &token_manifest,
+        &options,
+        &scheduler.sink.accumulator,
+        wall_started.elapsed(),
+    );
+    write_json(&options.output_dir.join("run.json"), &summary)?;
+    Ok(summary)
+}
+
+struct GeneratedSchedulerState<'a> {
+    scenario: &'a GeneratedScenario,
+    successors: Vec<Vec<usize>>,
+    remaining_dependencies: Vec<usize>,
+    dependency_completion_ns: Vec<u64>,
+    ready: ReadyQueue<usize>,
+    sink: ResultSink,
+    base: Instant,
+    time_scale: f64,
+}
+
+impl GeneratedSchedulerState<'_> {
+    fn release(
+        &mut self,
+        (ordinal, completed_at, result): (usize, Instant, RequestResult),
+    ) -> Result<()> {
+        let completed_ns = duration_ns(completed_at.saturating_duration_since(self.base));
+        self.sink.record(result)?;
+        for successor in self
+            .successors
+            .get(ordinal)
+            .with_context(|| format!("generated node {ordinal} has no successor slot"))?
+        {
+            let remaining = self
+                .remaining_dependencies
+                .get_mut(*successor)
+                .with_context(|| format!("generated successor {successor} is missing"))?;
+            *remaining = remaining
+                .checked_sub(1)
+                .with_context(|| format!("generated successor {successor} was released twice"))?;
+            let dependency_completion_ns = self
+                .dependency_completion_ns
+                .get_mut(*successor)
+                .with_context(|| format!("generated successor {successor} is missing timing"))?;
+            *dependency_completion_ns = (*dependency_completion_ns).max(completed_ns);
+            if *remaining == 0 {
+                let delay_ns = scaled_offset_ns(
+                    self.scenario.nodes[*successor].delay_after_dependencies_ms,
+                    self.time_scale,
+                )?;
+                self.ready.push(
+                    dependency_completion_ns
+                        .checked_add(delay_ns)
+                        .context("generated successor timestamp overflow")?,
+                    *successor,
+                    *successor,
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+struct ReplayPreparationContext<'a> {
+    dictionary: &'a TokenDictionary,
+    client: &'a reqwest::Client,
+    target: &'a str,
+    run_id: &'a str,
+    options: &'a ReplayOptions,
+    first_received_ms: u64,
+}
+
+impl ReplayPreparationContext<'_> {
+    fn fill_queue(
+        &self,
+        requests: &mut dyn RequestStream,
+        pending: &mut Option<TraceRequest>,
+        schedule: &mut VecDeque<(u64, PreparedRequest)>,
+        session_gates: &mut HashMap<String, Arc<Mutex<SessionGate>>>,
+        prepare_horizon_ns: u64,
+    ) -> Result<()> {
+        while let Some(request) = pending.as_ref() {
+            let ready_at_ns = scaled_offset_ns(
+                request.request_received_ms - self.first_received_ms,
+                self.options.time_scale,
+            )?;
+            if ready_at_ns > prepare_horizon_ns {
+                break;
+            }
+            let request = pending.take().expect("the pending request exists");
+            let ordinal = request.ordinal;
+            let session_gate = if self.options.serialize_sessions {
+                request.agent_context.as_ref().map(|context| {
+                    let gate = context
+                        .parent_session_id
+                        .as_ref()
+                        .and_then(|parent| session_gates.get(parent))
+                        .cloned()
+                        .unwrap_or_else(|| Arc::new(Mutex::new(SessionGate::default())));
+                    session_gates.insert(context.session_id.clone(), Arc::clone(&gate));
+                    gate
+                })
+            } else {
+                None
+            };
+            let prepared = prepare_request(
+                self.client,
+                self.target,
+                self.run_id,
+                self.options,
+                self.dictionary,
+                request,
+                session_gate,
+            )?;
+            if let Some((previous_ready_at_ns, previous)) = schedule.back()
+                && (*previous_ready_at_ns, previous.metadata.ordinal) > (ready_at_ns, ordinal)
+            {
+                bail!("the trace request stream is not ordered by timestamp and ordinal");
+            }
+            schedule.push_back((ready_at_ns, prepared));
+            *pending = requests.next_request()?;
+        }
+        Ok(())
+    }
 }
 
 fn prepare_request(
@@ -421,6 +835,17 @@ async fn warm_connections(
     Ok(())
 }
 
+fn build_http_client(options: &ReplayOptions) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(options.timeout.min(Duration::from_secs(30)))
+        .timeout(options.timeout)
+        .pool_max_idle_per_host(options.max_in_flight);
+    if matches!(options.http_transport, HttpTransport::Http2PriorKnowledge) {
+        builder = builder.http2_prior_knowledge();
+    }
+    builder.build().context("failed to build the HTTP client")
+}
+
 fn validate_options(options: &ReplayOptions) -> Result<()> {
     if options.model.trim().is_empty() {
         bail!("model must not be empty");
@@ -430,6 +855,12 @@ fn validate_options(options: &ReplayOptions) -> Result<()> {
     }
     if options.warmup_connections > options.max_in_flight {
         bail!("warmup_connections must not exceed max_in_flight");
+    }
+    if options.prepare_lookahead.is_zero() {
+        bail!("prepare_lookahead must be greater than zero");
+    }
+    if options.result_flush_interval == 0 {
+        bail!("result_flush_interval must be greater than zero");
     }
     if !options.time_scale.is_finite() || options.time_scale <= 0.0 {
         bail!("time_scale must be a positive finite number");
@@ -445,15 +876,6 @@ fn validate_options(options: &ReplayOptions) -> Result<()> {
             .with_context(|| format!("invalid static header name {name:?}"))?;
         HeaderValue::from_str(value)
             .with_context(|| format!("invalid value for static header {name:?}"))?;
-    }
-    Ok(())
-}
-
-fn validate_recorded_capacity(request_count: usize, max_in_flight: usize) -> Result<()> {
-    if max_in_flight < request_count {
-        bail!(
-            "shape-strict recorded replay requires max_in_flight ({max_in_flight}) to be at least the request count ({request_count}); a lower cap can retime arrivals when responses drain slowly"
-        );
     }
     Ok(())
 }
@@ -502,49 +924,19 @@ async fn send_request(
     scheduler_wake: Instant,
     scheduled_offset_ns: u64,
     prepared: PreparedRequest,
+    _permit: OwnedSemaphorePermit,
 ) -> Result<RequestResult> {
     let dispatch = Instant::now();
+    let mut result = request_result_shell(
+        context,
+        scheduled,
+        scheduler_wake,
+        scheduled_offset_ns,
+        &prepared,
+        dispatch,
+    );
+    let expected_output_tokens = prepared.metadata.output_tokens;
     let response = context.client.execute(prepared.http_request).await;
-    let dispatch_offset_ms = millis(dispatch.saturating_duration_since(context.base));
-    let dispatch_lag_ms = millis(dispatch.saturating_duration_since(scheduled));
-    let scheduler_wake_offset_ms = millis(scheduler_wake.saturating_duration_since(context.base));
-    let scheduler_wake_lag_ms = millis(scheduler_wake.saturating_duration_since(scheduled));
-    let local_admission_lag_ms = millis(dispatch.saturating_duration_since(scheduler_wake));
-    let session_id = prepared
-        .metadata
-        .agent_context
-        .as_ref()
-        .map(|context| context.session_id.clone());
-    let parent_session_id = prepared
-        .metadata
-        .agent_context
-        .as_ref()
-        .and_then(|context| context.parent_session_id.clone());
-
-    let mut result = RequestResult {
-        ordinal: prepared.metadata.ordinal,
-        source_request_id: prepared.metadata.source_request_id,
-        source_x_request_id: prepared.metadata.source_x_request_id,
-        replay_request_id: prepared.metadata.replay_request_id,
-        session_id,
-        parent_session_id,
-        scheduled_offset_ms: scheduled_offset_ns as f64 / 1_000_000.0,
-        scheduler_wake_offset_ms,
-        scheduler_wake_lag_ms,
-        dispatch_offset_ms,
-        dispatch_lag_ms,
-        local_admission_lag_ms,
-        expected_input_tokens: prepared.metadata.input_tokens,
-        expected_output_tokens: prepared.metadata.output_tokens,
-        observed_output_tokens: None,
-        output_length_match: None,
-        status_code: None,
-        ttft_ms: None,
-        total_time_ms: 0.0,
-        response_headers: BTreeMap::new(),
-        error: None,
-    };
-
     let response = match response {
         Ok(response) => response,
         Err(error) => {
@@ -574,11 +966,83 @@ async fn send_request(
             result.observed_output_tokens = stream.output_tokens;
             result.output_length_match = stream
                 .output_tokens
-                .map(|tokens| tokens == prepared.metadata.output_tokens as u64);
+                .map(|tokens| tokens == expected_output_tokens as u64);
         }
         Err(error) => result.error = Some(error.to_string()),
     }
     Ok(result)
+}
+
+fn admission_failure(
+    context: &ReplayContext,
+    scheduled: Instant,
+    scheduler_wake: Instant,
+    scheduled_offset_ns: u64,
+    prepared: PreparedRequest,
+    max_in_flight: usize,
+) -> RequestResult {
+    let dispatch = Instant::now();
+    let mut result = request_result_shell(
+        context,
+        scheduled,
+        scheduler_wake,
+        scheduled_offset_ns,
+        &prepared,
+        dispatch,
+    );
+    result.error = Some(format!(
+        "local admission limit {max_in_flight} was exhausted at the recorded arrival; the request was not retimed"
+    ));
+    result
+}
+
+fn request_result_shell(
+    context: &ReplayContext,
+    scheduled: Instant,
+    scheduler_wake: Instant,
+    scheduled_offset_ns: u64,
+    prepared: &PreparedRequest,
+    dispatch: Instant,
+) -> RequestResult {
+    let dispatch_offset_ms = millis(dispatch.saturating_duration_since(context.base));
+    let dispatch_lag_ms = millis(dispatch.saturating_duration_since(scheduled));
+    let scheduler_wake_offset_ms = millis(scheduler_wake.saturating_duration_since(context.base));
+    let scheduler_wake_lag_ms = millis(scheduler_wake.saturating_duration_since(scheduled));
+    let local_admission_lag_ms = millis(dispatch.saturating_duration_since(scheduler_wake));
+    let session_id = prepared
+        .metadata
+        .agent_context
+        .as_ref()
+        .map(|context| context.session_id.clone());
+    let parent_session_id = prepared
+        .metadata
+        .agent_context
+        .as_ref()
+        .and_then(|context| context.parent_session_id.clone());
+
+    RequestResult {
+        ordinal: prepared.metadata.ordinal,
+        source_request_id: prepared.metadata.source_request_id.clone(),
+        source_x_request_id: prepared.metadata.source_x_request_id.clone(),
+        replay_request_id: prepared.metadata.replay_request_id.clone(),
+        session_id,
+        parent_session_id,
+        scheduled_offset_ms: scheduled_offset_ns as f64 / 1_000_000.0,
+        scheduler_wake_offset_ms,
+        scheduler_wake_lag_ms,
+        dispatch_offset_ms,
+        dispatch_lag_ms,
+        local_admission_lag_ms,
+        expected_input_tokens: prepared.metadata.input_tokens,
+        expected_output_tokens: prepared.metadata.output_tokens,
+        observed_output_tokens: None,
+        output_length_match: None,
+        status_code: None,
+        ttft_ms: None,
+        total_time_ms: 0.0,
+        response_headers: BTreeMap::new(),
+        error: None,
+    }
 }
 
 fn messages_for_trigger(input_trigger: Option<&str>) -> serde_json::Value {
@@ -715,63 +1179,168 @@ fn selected_response_headers(headers: &reqwest::header::HeaderMap) -> BTreeMap<S
         .collect()
 }
 
-fn summarize(
+struct ResultSink {
+    writer: BufWriter<File>,
+    flush_interval: usize,
+    records_since_flush: usize,
+    accumulator: RunAccumulator,
+}
+
+impl ResultSink {
+    fn create(path: &Path, flush_interval: usize, dispatch_p99_limit_ms: f64) -> Result<Self> {
+        let writer = BufWriter::new(
+            File::create(path).with_context(|| format!("failed to create {}", path.display()))?,
+        );
+        Ok(Self {
+            writer,
+            flush_interval,
+            records_since_flush: 0,
+            accumulator: RunAccumulator::new(dispatch_p99_limit_ms)?,
+        })
+    }
+
+    fn record(&mut self, result: RequestResult) -> Result<()> {
+        self.accumulator.record(&result)?;
+        serde_json::to_writer(&mut self.writer, &result)
+            .context("failed to write request result")?;
+        self.writer.write_all(b"\n")?;
+        self.records_since_flush += 1;
+        if self.records_since_flush >= self.flush_interval {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.writer.flush()?;
+        self.records_since_flush = 0;
+        Ok(())
+    }
+}
+
+struct RunAccumulator {
+    request_count: usize,
+    succeeded: usize,
+    output_length_matches: usize,
+    output_length_mismatches: usize,
+    missing_output_usage: usize,
+    scheduler_wake_lag_us: Histogram<u64>,
+    dispatch_lag_us: Histogram<u64>,
+    local_admission_lag_us: Histogram<u64>,
+    dispatch_p99_limit_ms: f64,
+    dispatch_at_or_below_p99_limit: usize,
+    dispatch_max_ms: f64,
+}
+
+impl RunAccumulator {
+    fn new(dispatch_p99_limit_ms: f64) -> Result<Self> {
+        Ok(Self {
+            request_count: 0,
+            succeeded: 0,
+            output_length_matches: 0,
+            output_length_mismatches: 0,
+            missing_output_usage: 0,
+            scheduler_wake_lag_us: Histogram::new(3)?,
+            dispatch_lag_us: Histogram::new(3)?,
+            local_admission_lag_us: Histogram::new(3)?,
+            dispatch_p99_limit_ms,
+            dispatch_at_or_below_p99_limit: 0,
+            dispatch_max_ms: 0.0,
+        })
+    }
+
+    fn record(&mut self, result: &RequestResult) -> Result<()> {
+        self.request_count += 1;
+        if result.error.is_none() && result.status_code.is_some_and(|status| status < 400) {
+            self.succeeded += 1;
+        }
+        match result.output_length_match {
+            Some(true) => self.output_length_matches += 1,
+            Some(false) => self.output_length_mismatches += 1,
+            None => self.missing_output_usage += 1,
+        }
+        record_milliseconds(
+            &mut self.scheduler_wake_lag_us,
+            result.scheduler_wake_lag_ms,
+        )?;
+        record_milliseconds(&mut self.dispatch_lag_us, result.dispatch_lag_ms)?;
+        record_milliseconds(
+            &mut self.local_admission_lag_us,
+            result.local_admission_lag_ms,
+        )?;
+        if result.dispatch_lag_ms <= self.dispatch_p99_limit_ms {
+            self.dispatch_at_or_below_p99_limit += 1;
+        }
+        self.dispatch_max_ms = self.dispatch_max_ms.max(result.dispatch_lag_ms);
+        Ok(())
+    }
+}
+
+fn record_milliseconds(histogram: &mut Histogram<u64>, value: f64) -> Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        bail!("a request timing value is not a non-negative finite number");
+    }
+    let microseconds = (value * 1000.0).round_ties_even();
+    if microseconds > u64::MAX as f64 {
+        bail!("a request timing value exceeds the histogram range");
+    }
+    histogram.record(microseconds as u64)?;
+    Ok(())
+}
+
+fn histogram_percentiles(histogram: &Histogram<u64>) -> Percentiles {
+    if histogram.is_empty() {
+        return Percentiles::default();
+    }
+    Percentiles {
+        min: histogram.min() as f64 / 1000.0,
+        p50: histogram.value_at_quantile(0.50) as f64 / 1000.0,
+        p95: histogram.value_at_quantile(0.95) as f64 / 1000.0,
+        p99: histogram.value_at_quantile(0.99) as f64 / 1000.0,
+        max: histogram.max() as f64 / 1000.0,
+    }
+}
+
+struct SummaryIdentity<'a> {
+    workload_kind: &'static str,
     run_id: String,
-    target: &str,
+    target: &'a str,
+    source_storage: Option<TraceStorageManifest>,
+}
+
+fn summarize(
+    identity: SummaryIdentity<'_>,
     source: &TraceManifest,
     dictionary: &TokenDictionaryManifest,
     options: &ReplayOptions,
-    results: &[RequestResult],
+    accumulator: &RunAccumulator,
     elapsed: Duration,
 ) -> RunSummary {
-    let succeeded = results
-        .iter()
-        .filter(|result| {
-            result.error.is_none() && result.status_code.is_some_and(|status| status < 400)
-        })
-        .count();
-    let output_length_matches = results
-        .iter()
-        .filter(|result| result.output_length_match == Some(true))
-        .count();
-    let output_length_mismatches = results
-        .iter()
-        .filter(|result| result.output_length_match == Some(false))
-        .count();
-    let missing_output_usage = results
-        .iter()
-        .filter(|result| result.observed_output_tokens.is_none())
-        .count();
-    let lags = results
-        .iter()
-        .map(|result| result.dispatch_lag_ms)
-        .collect::<Vec<_>>();
-    let wake_lags = results
-        .iter()
-        .map(|result| result.scheduler_wake_lag_ms)
-        .collect::<Vec<_>>();
-    let admission_lags = results
-        .iter()
-        .map(|result| result.local_admission_lag_ms)
-        .collect::<Vec<_>>();
-    let scheduler_wake_lag_ms = percentiles(wake_lags);
-    let dispatch_lag_ms = percentiles(lags);
-    let local_admission_lag_ms = percentiles(admission_lags);
-    let request_fidelity_matches = succeeded == results.len()
-        && output_length_matches == results.len()
-        && missing_output_usage == 0;
-    let dispatch_timing_matches = dispatch_lag_ms.p99 <= options.max_dispatch_p99_ms
-        && dispatch_lag_ms.max <= options.max_dispatch_max_ms;
+    let scheduler_wake_lag_ms = histogram_percentiles(&accumulator.scheduler_wake_lag_us);
+    let mut dispatch_lag_ms = histogram_percentiles(&accumulator.dispatch_lag_us);
+    // Histograms are microsecond-quantized. Preserve the exact maximum so a
+    // value just over the configured hard limit cannot round down and pass.
+    dispatch_lag_ms.max = accumulator.dispatch_max_ms;
+    let local_admission_lag_ms = histogram_percentiles(&accumulator.local_admission_lag_us);
+    let request_fidelity_matches = accumulator.request_count == source.request_count
+        && accumulator.succeeded == source.request_count
+        && accumulator.output_length_matches == source.request_count
+        && accumulator.missing_output_usage == 0;
+    let dispatch_timing_matches = dispatch_timing_matches(accumulator, options.max_dispatch_max_ms);
     let passed = request_fidelity_matches && dispatch_timing_matches;
 
     RunSummary {
-        run_id,
+        workload_kind: identity.workload_kind,
+        run_id: identity.run_id,
         agent: options.agent,
         model: options.model.clone(),
-        target: target.to_string(),
+        target: identity.target.to_string(),
         time_scale: options.time_scale,
         max_in_flight: options.max_in_flight,
         warmup_connections: options.warmup_connections,
+        http_transport: options.http_transport,
+        prepare_lookahead_ms: options.prepare_lookahead.as_millis().min(u64::MAX as u128) as u64,
+        result_flush_interval: options.result_flush_interval,
         serialize_sessions: options.serialize_sessions,
         max_dispatch_p99_ms: options.max_dispatch_p99_ms,
         max_dispatch_max_ms: options.max_dispatch_max_ms,
@@ -782,13 +1351,14 @@ fn summarize(
             .map(|(name, _)| name.clone())
             .collect(),
         source: source.clone(),
+        source_storage: identity.source_storage,
         token_dictionary: dictionary.clone(),
-        request_count: results.len(),
-        succeeded,
-        failed: results.len() - succeeded,
-        output_length_matches,
-        output_length_mismatches,
-        missing_output_usage,
+        request_count: accumulator.request_count,
+        succeeded: accumulator.succeeded,
+        failed: accumulator.request_count - accumulator.succeeded,
+        output_length_matches: accumulator.output_length_matches,
+        output_length_mismatches: accumulator.output_length_mismatches,
+        missing_output_usage: accumulator.missing_output_usage,
         scheduler_wake_lag_ms,
         dispatch_lag_ms,
         local_admission_lag_ms,
@@ -797,6 +1367,13 @@ fn summarize(
         passed,
         total_time_ms: millis(elapsed),
     }
+}
+
+fn dispatch_timing_matches(accumulator: &RunAccumulator, max_limit_ms: f64) -> bool {
+    let p99_rank = usize::try_from((accumulator.request_count as u128 * 99).div_ceil(100))
+        .unwrap_or(usize::MAX);
+    accumulator.dispatch_at_or_below_p99_limit >= p99_rank
+        && accumulator.dispatch_max_ms <= max_limit_ms
 }
 
 pub(crate) fn percentiles(mut values: Vec<f64>) -> Percentiles {
@@ -828,20 +1405,6 @@ fn normalize_target(target: &str) -> String {
     }
 }
 
-fn write_request_results(output_dir: &Path, results: &[RequestResult]) -> Result<()> {
-    let path = output_dir.join("requests.jsonl");
-    let mut writer = BufWriter::new(
-        File::create(&path).with_context(|| format!("failed to create {}", path.display()))?,
-    );
-    for result in results {
-        serde_json::to_writer(&mut writer, result)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        writer.write_all(b"\n")?;
-    }
-    writer.flush()?;
-    Ok(())
-}
-
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let writer = BufWriter::new(
         File::create(path).with_context(|| format!("failed to create {}", path.display()))?,
@@ -870,6 +1433,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::scenario::{GeneratedScenario, GeneratorConfig};
     use crate::token_shape::SafeTokenAlphabet;
     use crate::trace::{AgentContext, TraceRequest};
 
@@ -892,6 +1456,15 @@ mod tests {
         assert_eq!(result.p50, 50.0);
         assert_eq!(result.p95, 95.0);
         assert_eq!(result.p99, 99.0);
+    }
+
+    #[test]
+    fn hard_dispatch_limit_uses_the_unrounded_maximum() {
+        let mut accumulator = RunAccumulator::new(10.0).unwrap();
+        accumulator.request_count = 1;
+        accumulator.dispatch_at_or_below_p99_limit = 1;
+        accumulator.dispatch_max_ms = 5.000_4;
+        assert!(!dispatch_timing_matches(&accumulator, 5.0));
     }
 
     #[test]
@@ -942,8 +1515,8 @@ mod tests {
             input_tokens: 3,
             output_tokens: 2,
             request_received_ms: 1000,
-            trace_block_size: 2,
-            input_sequence_hashes: vec![11, 22],
+            trace_block_size: 16,
+            input_sequence_hashes: vec![11],
             agent_context: Some(AgentContext {
                 session_id: "thread-1".to_string(),
                 parent_session_id: None,
@@ -964,13 +1537,16 @@ mod tests {
                 duration_ms: 0,
                 input_tokens: 3,
                 output_tokens: 2,
-                distinct_sequence_hashes: 2,
-                trace_block_size: 2,
+                distinct_sequence_hashes: 1,
+                trace_block_size: 16,
                 source_digest_sha256: "source".to_string(),
             },
         };
-        let dictionary =
-            TokenDictionary::build(&[request], SafeTokenAlphabet::new(100, 16).unwrap()).unwrap();
+        let dictionary = TokenDictionary::build(
+            &[request],
+            SafeTokenAlphabet::from_unverified_range(100, 1024, &[]).unwrap(),
+        )
+        .unwrap();
         let output = tempdir().unwrap();
         let summary = run_replay(
             trace,
@@ -982,6 +1558,9 @@ mod tests {
                 output_dir: output.path().to_path_buf(),
                 max_in_flight: 1,
                 warmup_connections: 0,
+                http_transport: HttpTransport::Http2PriorKnowledge,
+                prepare_lookahead: Duration::from_millis(100),
+                result_flush_interval: 1,
                 serialize_sessions: false,
                 max_dispatch_p99_ms: 100.0,
                 max_dispatch_max_ms: 100.0,
@@ -998,6 +1577,7 @@ mod tests {
         assert_eq!(summary.succeeded, 1);
         assert_eq!(summary.output_length_matches, 1);
         assert!(summary.passed);
+        assert!(summary.total_time_ms >= 5.0);
         let (headers, body) = capture.0.lock().unwrap().clone().unwrap();
         assert_eq!(headers.get("thread-id").unwrap(), "thread-1");
         assert_eq!(headers.get("x-dynamo-session-id").unwrap(), "thread-1");
@@ -1016,7 +1596,7 @@ mod tests {
             })
         );
         assert_eq!(body["max_tokens"], 2);
-        assert_eq!(body["min_tokens"], 2);
+        assert!(body.get("min_tokens").is_none());
         assert_eq!(body["ignore_eos"], true);
         assert_eq!(body["messages"][0]["role"], "assistant");
         assert_eq!(body["messages"][1]["role"], "tool");
@@ -1049,8 +1629,8 @@ mod tests {
                 input_tokens: 3,
                 output_tokens: 2,
                 request_received_ms: 1_000 + (ordinal / 3) as u64,
-                trace_block_size: 2,
-                input_sequence_hashes: vec![11, 22],
+                trace_block_size: 16,
+                input_sequence_hashes: vec![11],
                 agent_context: Some(AgentContext {
                     session_id: format!("thread-{}", ordinal % 12),
                     parent_session_id: None,
@@ -1060,8 +1640,11 @@ mod tests {
                 }),
             })
             .collect::<Vec<_>>();
-        let dictionary =
-            TokenDictionary::build(&requests, SafeTokenAlphabet::new(100, 16).unwrap()).unwrap();
+        let dictionary = TokenDictionary::build(
+            &requests,
+            SafeTokenAlphabet::from_unverified_range(100, 1024, &[]).unwrap(),
+        )
+        .unwrap();
         let trace = LoadedTrace {
             requests,
             manifest: TraceManifest {
@@ -1074,8 +1657,8 @@ mod tests {
                 duration_ms: 31,
                 input_tokens: 288,
                 output_tokens: 192,
-                distinct_sequence_hashes: 2,
-                trace_block_size: 2,
+                distinct_sequence_hashes: 1,
+                trace_block_size: 16,
                 source_digest_sha256: "source".to_string(),
             },
         };
@@ -1090,6 +1673,9 @@ mod tests {
                 output_dir: output.path().to_path_buf(),
                 max_in_flight: 96,
                 warmup_connections: 0,
+                http_transport: HttpTransport::Auto,
+                prepare_lookahead: Duration::from_millis(100),
+                result_flush_interval: 1,
                 serialize_sessions: false,
                 max_dispatch_p99_ms: 100.0,
                 max_dispatch_max_ms: 100.0,
@@ -1110,11 +1696,92 @@ mod tests {
         server.abort();
     }
 
-    #[test]
-    fn rejects_a_local_cap_that_can_retime_recorded_arrivals() {
-        let error = validate_recorded_capacity(3, 2).unwrap_err();
-        assert!(error.to_string().contains("can retime arrivals"));
-        validate_recorded_capacity(3, 3).unwrap();
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn generated_graph_releases_tool_successor_after_completion() {
+        let capture = Capture::default();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(shape_endpoint))
+            .with_state(capture);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config: GeneratorConfig = toml::from_str(
+            r#"
+                schema_version = 1
+                agent = "codex"
+                seed = 9
+
+                [load]
+                root_sessions = 1
+                concurrent_agents = 1
+
+                [trajectory]
+                turns = { kind = "fixed", value = 2 }
+                output_tokens = { kind = "fixed", value = 2 }
+
+                [tokens]
+                system_prefix_tokens = { kind = "fixed", value = 16 }
+                tool_catalog_tokens = { kind = "fixed", value = 16 }
+                repository_tokens = { kind = "fixed", value = 16 }
+                session_tokens = { kind = "fixed", value = 16 }
+                user_tokens = { kind = "fixed", value = 16 }
+
+                [behavior]
+                tool_probability = 1.0
+                parallel_tool_probability = 0.0
+                subagent_probability = 0.0
+                swarm_probability = 0.0
+                completion_probability = 0.0
+                background_request_probability = 0.0
+
+                [compaction]
+                enabled = false
+
+                [subagents]
+                max_depth = 0
+            "#,
+        )
+        .unwrap();
+        let scenario = GeneratedScenario::generate(config.resolve().unwrap()).unwrap();
+        assert_eq!(scenario.nodes.len(), 2);
+        assert_eq!(scenario.nodes[1].dependencies, vec![0]);
+        let dictionary = TokenDictionary::new(
+            scenario.trace_manifest.trace_block_size,
+            scenario.trace_manifest.distinct_sequence_hashes,
+            SafeTokenAlphabet::from_unverified_range(100, 1024, &[]).unwrap(),
+        )
+        .unwrap();
+        let output = tempdir().unwrap();
+        let summary = run_generated_scenario(
+            &scenario,
+            dictionary,
+            ReplayOptions {
+                agent: AgentKind::Codex,
+                model: "test-model".to_string(),
+                target: format!("http://{address}"),
+                output_dir: output.path().to_path_buf(),
+                max_in_flight: 2,
+                warmup_connections: 0,
+                http_transport: HttpTransport::Auto,
+                prepare_lookahead: Duration::from_millis(1),
+                result_flush_interval: 1,
+                serialize_sessions: false,
+                max_dispatch_p99_ms: 100.0,
+                max_dispatch_max_ms: 100.0,
+                start_delay: Duration::from_millis(5),
+                timeout: Duration::from_secs(5),
+                time_scale: 100.0,
+                preserve_request_ids: false,
+                static_headers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.workload_kind, "generated-closed-loop");
+        assert_eq!(summary.succeeded, 2);
+        assert!(summary.passed);
+        assert!(output.path().join("scenario.json").is_file());
+        server.abort();
     }
 
     #[test]

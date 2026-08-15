@@ -1,0 +1,7 @@
+agent-loadgen
+Copyright 2026 NVIDIA Corporation and contributors
+
+This product includes software developed by NVIDIA Corporation as part of NVIDIA Dynamo. Derived source files retain their original copyright and Apache-2.0 license headers.
+
+NVIDIA Dynamo: https://github.com/ai-dynamo/dynamo
+AIPerf: https://github.com/ai-dynamo/aiperf

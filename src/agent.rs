@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::trace::AgentContext;
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentKind {
     ClaudeCode,
@@ -106,6 +106,26 @@ mod tests {
                 ("x-claude-code-session-id", "parent".to_string()),
                 ("x-claude-code-agent-id", "child".to_string()),
                 ("x-claude-code-parent-agent-id", "parent".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_child_sets_session_headers() {
+        let context = AgentContext {
+            session_id: "child".to_string(),
+            parent_session_id: Some("parent".to_string()),
+            session_final: None,
+            compaction: None,
+            input_trigger: None,
+        };
+        assert_eq!(
+            agent_headers(AgentKind::Opencode, Some(&context)),
+            vec![
+                ("x-dynamo-session-id", "child".to_string()),
+                ("x-dynamo-parent-session-id", "parent".to_string()),
+                ("x-session-id", "child".to_string()),
+                ("x-parent-session-id", "parent".to_string())
             ]
         );
     }

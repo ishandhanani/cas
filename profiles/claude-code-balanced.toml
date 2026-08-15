@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = 1
+agent = "claude-code"
+seed = 42
+
+[load]
+root_sessions = 16
+concurrent_agents = 8
+startup_interval_ms = 0
+restart_delay_ms = { kind = "fixed", value = 0 }
+
+[behavior]
+tool_probability = 0.54
+parallel_tool_probability = 0.08
+subagent_probability = 0.10
+swarm_probability = 0.025
+completion_probability = 0.10
+background_request_probability = 0.08
+
+[subagents]
+max_depth = 2
+fanout = { kind = "uniform", min = 2, max = 4 }
+blocking_probability = 0.72
+
+[limits]
+max_nodes = 10000
+max_sessions = 1000
+max_total_input_tokens = 250000000

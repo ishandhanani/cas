@@ -31,10 +31,13 @@ pub struct FidelityReport {
     pub input_length_matches: usize,
     pub output_length_matches: usize,
     pub agent_context_matches: usize,
+    pub compaction_metadata_matches: usize,
+    pub unverifiable_compaction_metadata: usize,
     pub prefix_topology_matches: bool,
     pub arrival_error_ms: ArrivalError,
     pub arrival_timing_matches: bool,
     pub mismatches: Vec<String>,
+    pub warnings: Vec<String>,
     pub passed: bool,
 }
 
@@ -156,6 +159,9 @@ fn compare_loaded(
     let mut input_length_matches = 0;
     let mut output_length_matches = 0;
     let mut agent_context_matches = 0;
+    let mut compaction_metadata_matches = 0;
+    let mut unverifiable_compaction_metadata = 0;
+    let mut warnings = Vec::new();
     for (source_request, replay_request) in &pairs {
         compare_field(
             &mut trace_block_size_matches,
@@ -184,7 +190,10 @@ fn compare_loaded(
             source_request.output_tokens,
             replay_request.output_tokens,
         );
-        if source_request.agent_context == replay_request.agent_context {
+        if agent_context_core_matches(
+            source_request.agent_context.as_ref(),
+            replay_request.agent_context.as_ref(),
+        ) {
             agent_context_matches += 1;
         } else {
             add_mismatch(
@@ -194,6 +203,26 @@ fn compare_loaded(
                     source_request.source_request_id,
                     source_request.agent_context,
                     replay_request.agent_context
+                ),
+            );
+        }
+        let source_compaction = source_request
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.compaction.as_ref());
+        let replay_compaction = replay_request
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.compaction.as_ref());
+        if source_compaction == replay_compaction {
+            compaction_metadata_matches += 1;
+        } else {
+            unverifiable_compaction_metadata += 1;
+            add_mismatch(
+                &mut warnings,
+                format!(
+                    "request {} opaque compaction metadata is not observable in the captured Dynamo agent context",
+                    source_request.source_request_id
                 ),
             );
         }
@@ -244,12 +273,31 @@ fn compare_loaded(
         input_length_matches,
         output_length_matches,
         agent_context_matches,
+        compaction_metadata_matches,
+        unverifiable_compaction_metadata,
         prefix_topology_matches,
         arrival_error_ms,
         arrival_timing_matches,
         mismatches,
+        warnings,
         passed,
     })
+}
+
+fn agent_context_core_matches(
+    source: Option<&crate::trace::AgentContext>,
+    replay: Option<&crate::trace::AgentContext>,
+) -> bool {
+    match (source, replay) {
+        (None, None) => true,
+        (Some(source), Some(replay)) => {
+            source.session_id == replay.session_id
+                && source.parent_session_id == replay.parent_session_id
+                && source.session_final == replay.session_final
+                && source.input_trigger == replay.input_trigger
+        }
+        _ => false,
+    }
 }
 
 fn compare_field<T: std::fmt::Display>(
@@ -332,6 +380,7 @@ fn add_mismatch(mismatches: &mut Vec<String>, mismatch: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::AgentContext;
 
     fn request(
         id: &str,
@@ -366,5 +415,19 @@ mod tests {
         );
         assert_eq!(arrival_error(&pairs, 1.0).absolute.max, 0.0);
         assert_eq!(arrival_error(&pairs, 2.0).absolute.max, 10.0);
+    }
+
+    #[test]
+    fn core_agent_context_ignores_opaque_compaction_metadata() {
+        let source = AgentContext {
+            session_id: "thread".to_string(),
+            parent_session_id: None,
+            session_final: Some(true),
+            compaction: Some(serde_json::json!({"phase": "post_tool"})),
+            input_trigger: Some("other".to_string()),
+        };
+        let mut replay = source.clone();
+        replay.compaction = None;
+        assert!(agent_context_core_matches(Some(&source), Some(&replay)));
     }
 }

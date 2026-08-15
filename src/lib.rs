@@ -4,6 +4,7 @@ pub mod agent;
 pub mod clock;
 pub mod compare;
 pub mod replay;
+pub mod scenario;
 pub mod scheduler;
 pub mod token_shape;
 pub mod trace;
