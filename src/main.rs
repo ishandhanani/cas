@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agent_loadgen::agent::AgentKind;
-use agent_loadgen::compare::compare_traces;
+use agent_loadgen::compare::{CompareOptions, compare_traces};
 use agent_loadgen::replay::{ReplayOptions, run_replay};
 use agent_loadgen::token_shape::{SafeTokenAlphabet, TokenDictionary};
 use agent_loadgen::trace::load_trace;
@@ -127,6 +127,18 @@ enum Command {
         /// requests.jsonl from the replay run.
         #[arg(long)]
         requests: PathBuf,
+
+        /// Divide source arrival offsets by this value before comparison.
+        #[arg(long, default_value_t = 1.0)]
+        time_scale: f64,
+
+        /// Maximum allowed p99 frontend arrival error.
+        #[arg(long, default_value_t = 5.0)]
+        max_arrival_p99_ms: f64,
+
+        /// Maximum allowed frontend arrival error.
+        #[arg(long, default_value_t = 20.0)]
+        max_arrival_max_ms: f64,
     },
 }
 
@@ -202,11 +214,23 @@ async fn main() -> Result<()> {
             source,
             replay,
             requests,
+            time_scale,
+            max_arrival_p99_ms,
+            max_arrival_max_ms,
         } => {
-            let report = compare_traces(&source, &replay, &requests)?;
+            let report = compare_traces(
+                &source,
+                &replay,
+                &requests,
+                CompareOptions {
+                    time_scale,
+                    max_arrival_p99_ms,
+                    max_arrival_max_ms,
+                },
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if !report.passed {
-                bail!("shape fidelity comparison failed");
+                bail!("replay fidelity comparison failed");
             }
         }
     }

@@ -19,6 +19,9 @@ struct RequestMapping {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FidelityReport {
+    pub time_scale: f64,
+    pub max_arrival_p99_ms: f64,
+    pub max_arrival_max_ms: f64,
     pub source_request_count: usize,
     pub replay_request_count: usize,
     pub mapped_request_count: usize,
@@ -30,8 +33,16 @@ pub struct FidelityReport {
     pub agent_context_matches: usize,
     pub prefix_topology_matches: bool,
     pub arrival_error_ms: ArrivalError,
+    pub arrival_timing_matches: bool,
     pub mismatches: Vec<String>,
     pub passed: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompareOptions {
+    pub time_scale: f64,
+    pub max_arrival_p99_ms: f64,
+    pub max_arrival_max_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,11 +55,26 @@ pub fn compare_traces(
     source_paths: &[PathBuf],
     replay_paths: &[PathBuf],
     request_results_path: &Path,
+    options: CompareOptions,
 ) -> Result<FidelityReport> {
+    validate_options(options)?;
     let source = load_trace(source_paths, None, None).context("failed to load the source trace")?;
     let replay = load_trace(replay_paths, None, None).context("failed to load the replay trace")?;
     let mappings = load_mappings(request_results_path)?;
-    compare_loaded(&source, &replay, &mappings)
+    compare_loaded(&source, &replay, &mappings, options)
+}
+
+fn validate_options(options: CompareOptions) -> Result<()> {
+    if !options.time_scale.is_finite() || options.time_scale <= 0.0 {
+        bail!("time_scale must be a positive finite number");
+    }
+    if !options.max_arrival_p99_ms.is_finite() || options.max_arrival_p99_ms < 0.0 {
+        bail!("max_arrival_p99_ms must be a non-negative finite number");
+    }
+    if !options.max_arrival_max_ms.is_finite() || options.max_arrival_max_ms < 0.0 {
+        bail!("max_arrival_max_ms must be a non-negative finite number");
+    }
+    Ok(())
 }
 
 fn load_mappings(path: &Path) -> Result<Vec<RequestMapping>> {
@@ -79,6 +105,7 @@ fn compare_loaded(
     source: &LoadedTrace,
     replay: &LoadedTrace,
     mappings: &[RequestMapping],
+    options: CompareOptions,
 ) -> Result<FidelityReport> {
     let source_by_id: HashMap<&str, &TraceRequest> = source
         .requests
@@ -180,16 +207,34 @@ fn compare_loaded(
             "canonical prefix topology does not match".to_string(),
         );
     }
-    let arrival_error_ms = arrival_error(&pairs);
+    let arrival_error_ms = arrival_error(&pairs, options.time_scale);
+    let arrival_timing_matches = arrival_error_ms.absolute.p99 <= options.max_arrival_p99_ms
+        && arrival_error_ms.absolute.max <= options.max_arrival_max_ms;
+    if !arrival_timing_matches {
+        add_mismatch(
+            &mut mismatches,
+            format!(
+                "arrival timing exceeds limits: p99={:.3} ms (limit {:.3}), max={:.3} ms (limit {:.3})",
+                arrival_error_ms.absolute.p99,
+                options.max_arrival_p99_ms,
+                arrival_error_ms.absolute.max,
+                options.max_arrival_max_ms
+            ),
+        );
+    }
     let mapped_request_count = pairs.len();
     let passed = mapped_request_count == mappings.len()
         && trace_block_size_matches == mapped_request_count
         && input_length_matches == mapped_request_count
         && output_length_matches == mapped_request_count
         && agent_context_matches == mapped_request_count
-        && prefix_topology_matches;
+        && prefix_topology_matches
+        && arrival_timing_matches;
 
     Ok(FidelityReport {
+        time_scale: options.time_scale,
+        max_arrival_p99_ms: options.max_arrival_p99_ms,
+        max_arrival_max_ms: options.max_arrival_max_ms,
         source_request_count: source.requests.len(),
         replay_request_count: replay.requests.len(),
         mapped_request_count,
@@ -201,6 +246,7 @@ fn compare_loaded(
         agent_context_matches,
         prefix_topology_matches,
         arrival_error_ms,
+        arrival_timing_matches,
         mismatches,
         passed,
     })
@@ -253,7 +299,7 @@ fn canonical_prefix_sequences(
         .collect()
 }
 
-fn arrival_error(pairs: &[(&TraceRequest, &TraceRequest)]) -> ArrivalError {
+fn arrival_error(pairs: &[(&TraceRequest, &TraceRequest)], time_scale: f64) -> ArrivalError {
     let Some((first_source, first_replay)) = pairs.first() else {
         return ArrivalError {
             absolute: Percentiles::default(),
@@ -266,7 +312,7 @@ fn arrival_error(pairs: &[(&TraceRequest, &TraceRequest)]) -> ArrivalError {
             source.request_received_ms as i128 - first_source.request_received_ms as i128;
         let replay_offset =
             replay.request_received_ms as i128 - first_replay.request_received_ms as i128;
-        signed.push((replay_offset - source_offset) as f64);
+        signed.push(replay_offset as f64 - source_offset as f64 / time_scale);
     }
     let mean_signed = signed.iter().sum::<f64>() / signed.len() as f64;
     let absolute = crate::replay::percentiles(signed.iter().map(|value| value.abs()).collect());
@@ -318,6 +364,7 @@ mod tests {
             canonical_prefix_sequences(&pairs, true),
             canonical_prefix_sequences(&pairs, false)
         );
-        assert_eq!(arrival_error(&pairs).absolute.max, 0.0);
+        assert_eq!(arrival_error(&pairs, 1.0).absolute.max, 0.0);
+        assert_eq!(arrival_error(&pairs, 2.0).absolute.max, 10.0);
     }
 }

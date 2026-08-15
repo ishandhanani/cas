@@ -68,6 +68,8 @@ agent-loadgen compare \
 
 The comparison checks exact ISL, exact OSL, agent context, canonical prefix topology, and normalized arrival offsets.
 
+Comparison fails by default when frontend arrival error exceeds 5 ms at p99 or 20 ms maximum. Use `--time-scale` for a scaled replay, and override the timing limits only when the benchmark contract calls for different values.
+
 ## Outputs
 
 - `run.json` contains the run configuration, shape manifest, timer backend, timing percentiles, and length fidelity.
