@@ -31,6 +31,8 @@ pub struct ReplayOptions {
     pub max_in_flight: usize,
     pub warmup_connections: usize,
     pub serialize_sessions: bool,
+    pub max_dispatch_p99_ms: f64,
+    pub max_dispatch_max_ms: f64,
     pub start_delay: Duration,
     pub timeout: Duration,
     pub time_scale: f64,
@@ -73,6 +75,8 @@ pub struct RunSummary {
     pub max_in_flight: usize,
     pub warmup_connections: usize,
     pub serialize_sessions: bool,
+    pub max_dispatch_p99_ms: f64,
+    pub max_dispatch_max_ms: f64,
     pub timer_backend: &'static str,
     pub static_header_names: Vec<String>,
     pub source: TraceManifest,
@@ -86,6 +90,9 @@ pub struct RunSummary {
     pub scheduler_wake_lag_ms: Percentiles,
     pub dispatch_lag_ms: Percentiles,
     pub local_admission_lag_ms: Percentiles,
+    pub request_fidelity_matches: bool,
+    pub dispatch_timing_matches: bool,
+    pub passed: bool,
     pub total_time_ms: f64,
 }
 
@@ -391,6 +398,12 @@ fn validate_options(options: &ReplayOptions) -> Result<()> {
     }
     if !options.time_scale.is_finite() || options.time_scale <= 0.0 {
         bail!("time_scale must be a positive finite number");
+    }
+    if !options.max_dispatch_p99_ms.is_finite() || options.max_dispatch_p99_ms < 0.0 {
+        bail!("max_dispatch_p99_ms must be a non-negative finite number");
+    }
+    if !options.max_dispatch_max_ms.is_finite() || options.max_dispatch_max_ms < 0.0 {
+        bail!("max_dispatch_max_ms must be a non-negative finite number");
     }
     for (name, value) in &options.static_headers {
         HeaderName::from_bytes(name.as_bytes())
@@ -706,6 +719,15 @@ fn summarize(
         .iter()
         .map(|result| result.local_admission_lag_ms)
         .collect::<Vec<_>>();
+    let scheduler_wake_lag_ms = percentiles(wake_lags);
+    let dispatch_lag_ms = percentiles(lags);
+    let local_admission_lag_ms = percentiles(admission_lags);
+    let request_fidelity_matches = succeeded == results.len()
+        && output_length_matches == results.len()
+        && missing_output_usage == 0;
+    let dispatch_timing_matches = dispatch_lag_ms.p99 <= options.max_dispatch_p99_ms
+        && dispatch_lag_ms.max <= options.max_dispatch_max_ms;
+    let passed = request_fidelity_matches && dispatch_timing_matches;
 
     RunSummary {
         run_id,
@@ -716,6 +738,8 @@ fn summarize(
         max_in_flight: options.max_in_flight,
         warmup_connections: options.warmup_connections,
         serialize_sessions: options.serialize_sessions,
+        max_dispatch_p99_ms: options.max_dispatch_p99_ms,
+        max_dispatch_max_ms: options.max_dispatch_max_ms,
         timer_backend: TIMER_BACKEND,
         static_header_names: options
             .static_headers
@@ -730,9 +754,12 @@ fn summarize(
         output_length_matches,
         output_length_mismatches,
         missing_output_usage,
-        scheduler_wake_lag_ms: percentiles(wake_lags),
-        dispatch_lag_ms: percentiles(lags),
-        local_admission_lag_ms: percentiles(admission_lags),
+        scheduler_wake_lag_ms,
+        dispatch_lag_ms,
+        local_admission_lag_ms,
+        request_fidelity_matches,
+        dispatch_timing_matches,
+        passed,
         total_time_ms: millis(elapsed),
     }
 }
@@ -921,6 +948,8 @@ mod tests {
                 max_in_flight: 1,
                 warmup_connections: 0,
                 serialize_sessions: false,
+                max_dispatch_p99_ms: 100.0,
+                max_dispatch_max_ms: 100.0,
                 start_delay: Duration::from_millis(5),
                 timeout: Duration::from_secs(5),
                 time_scale: 1.0,
@@ -933,6 +962,7 @@ mod tests {
 
         assert_eq!(summary.succeeded, 1);
         assert_eq!(summary.output_length_matches, 1);
+        assert!(summary.passed);
         let (headers, body) = capture.0.lock().unwrap().clone().unwrap();
         assert_eq!(headers.get("thread-id").unwrap(), "thread-1");
         assert_eq!(headers.get("x-dynamo-session-id").unwrap(), "thread-1");
@@ -1026,6 +1056,8 @@ mod tests {
                 max_in_flight: 96,
                 warmup_connections: 0,
                 serialize_sessions: false,
+                max_dispatch_p99_ms: 100.0,
+                max_dispatch_max_ms: 100.0,
                 start_delay: Duration::from_millis(25),
                 timeout: Duration::from_secs(5),
                 time_scale: 1.0,

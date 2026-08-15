@@ -93,6 +93,14 @@ enum Command {
         #[arg(long)]
         serialize_sessions: bool,
 
+        /// Maximum allowed p99 client dispatch lag.
+        #[arg(long, default_value_t = 2.0)]
+        max_dispatch_p99_ms: f64,
+
+        /// Maximum allowed client dispatch lag.
+        #[arg(long, default_value_t = 5.0)]
+        max_dispatch_max_ms: f64,
+
         /// Delay before the first scheduled request.
         #[arg(long, default_value_t = 100)]
         start_delay_ms: u64,
@@ -178,6 +186,8 @@ async fn main() -> Result<()> {
             max_in_flight,
             warmup_connections,
             serialize_sessions,
+            max_dispatch_p99_ms,
+            max_dispatch_max_ms,
             start_delay_ms,
             timeout_seconds,
             time_scale,
@@ -200,6 +210,8 @@ async fn main() -> Result<()> {
                     max_in_flight,
                     warmup_connections,
                     serialize_sessions,
+                    max_dispatch_p99_ms,
+                    max_dispatch_max_ms,
                     start_delay: Duration::from_millis(start_delay_ms),
                     timeout: Duration::from_secs(timeout_seconds),
                     time_scale,
@@ -209,6 +221,9 @@ async fn main() -> Result<()> {
             )
             .await?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
+            if !summary.passed {
+                bail!("shape-strict replay failed request or dispatch-timing fidelity checks");
+            }
         }
         Command::Compare {
             source,

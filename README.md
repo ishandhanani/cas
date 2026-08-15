@@ -51,6 +51,8 @@ Strict replay rejects zero-output records. Such records need a separate prefill-
 
 The default timing mode never retimes late requests. The run is invalid when local admission or target backpressure causes excessive dispatch lag.
 
+Shape-strict replay fails by default when client dispatch lag exceeds 2 ms at p99 or 5 ms maximum, or when any request or output-length check fails. Override the timing limits only when the benchmark contract calls for different values.
+
 Shape-strict replay requires `--max-in-flight` to be at least the selected request count so response speed cannot hold back a recorded arrival. On Unix, the process raises its soft open-file limit to support the requested capacity or fails before network traffic starts.
 
 `--serialize-sessions` waits for each previous response in the same session. It is useful as a causal workload transformation, but it does not claim recorded-arrival timing fidelity.
