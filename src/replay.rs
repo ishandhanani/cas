@@ -114,7 +114,13 @@ struct ReplayContext {
 struct PreparedRequest {
     metadata: PreparedMetadata,
     http_request: reqwest::Request,
-    session_gate: Option<Arc<Mutex<()>>>,
+    session_gate: Option<Arc<Mutex<SessionGate>>>,
+}
+
+#[derive(Default)]
+struct SessionGate {
+    last_request_received_ms: Option<u64>,
+    last_completed_at: Option<Instant>,
 }
 
 struct PreparedMetadata {
@@ -125,6 +131,7 @@ struct PreparedMetadata {
     agent_context: Option<AgentContext>,
     input_tokens: usize,
     output_tokens: u32,
+    request_received_ms: u64,
 }
 
 pub async fn run_replay(
@@ -139,7 +146,9 @@ pub async fn run_replay(
             trace.manifest.zero_output_requests
         );
     }
-    validate_recorded_capacity(trace.manifest.request_count, options.max_in_flight)?;
+    if !options.serialize_sessions {
+        validate_recorded_capacity(trace.manifest.request_count, options.max_in_flight)?;
+    }
     prepare_open_file_limit(options.max_in_flight)?;
     fs::create_dir_all(&options.output_dir).with_context(|| {
         format!(
@@ -197,11 +206,30 @@ pub async fn run_replay(
             let context = context.clone();
             let semaphore = Arc::clone(&semaphore);
             let session_gate = ready.value.session_gate.clone();
+            let request_received_ms = ready.value.metadata.request_received_ms;
+            let time_scale = options.time_scale;
             tasks.spawn(async move {
-                let _session_guard = match session_gate {
+                let mut session_guard = match session_gate {
                     Some(gate) => Some(gate.lock_owned().await),
                     None => None,
                 };
+                if let Some(gate) = session_guard.as_ref() {
+                    if let (Some(previous_received_ms), Some(previous_completed_at)) = (
+                        gate.last_request_received_ms,
+                        gate.last_completed_at,
+                    ) {
+                        let gap_ns = scaled_offset_ns(
+                            request_received_ms.saturating_sub(previous_received_ms),
+                            time_scale,
+                        )?;
+                        sleep_until(
+                            previous_completed_at
+                                .checked_add(Duration::from_nanos(gap_ns))
+                                .context("the session replay delay exceeds the monotonic clock range")?,
+                        )
+                        .await;
+                    }
+                }
                 let permit = semaphore
                     .acquire_owned()
                     .await
@@ -215,6 +243,10 @@ pub async fn run_replay(
                 )
                 .await;
                 drop(permit);
+                if let Some(gate) = session_guard.as_mut() {
+                    gate.last_request_received_ms = Some(request_received_ms);
+                    gate.last_completed_at = Some(Instant::now());
+                }
                 result
             });
         }
@@ -250,7 +282,7 @@ fn prepare_schedule(
     first_received_ms: u64,
 ) -> Result<ReadyQueue<PreparedRequest>> {
     let mut schedule = ReadyQueue::with_capacity(requests.len());
-    let mut session_gates = HashMap::<String, Arc<Mutex<()>>>::new();
+    let mut session_gates = HashMap::<String, Arc<Mutex<SessionGate>>>::new();
     for request in requests {
         let ready_at_ns = scaled_offset_ns(
             request.request_received_ms - first_received_ms,
@@ -259,11 +291,14 @@ fn prepare_schedule(
         let ordinal = request.ordinal;
         let session_gate = if options.serialize_sessions {
             request.agent_context.as_ref().map(|context| {
-                Arc::clone(
-                    session_gates
-                        .entry(context.session_id.clone())
-                        .or_insert_with(|| Arc::new(Mutex::new(()))),
-                )
+                let gate = context
+                    .parent_session_id
+                    .as_ref()
+                    .and_then(|parent| session_gates.get(parent))
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(Mutex::new(SessionGate::default())));
+                session_gates.insert(context.session_id.clone(), Arc::clone(&gate));
+                gate
             })
         } else {
             None
@@ -289,7 +324,7 @@ fn prepare_request(
     options: &ReplayOptions,
     dictionary: &TokenDictionary,
     request: TraceRequest,
-    session_gate: Option<Arc<Mutex<()>>>,
+    session_gate: Option<Arc<Mutex<SessionGate>>>,
 ) -> Result<PreparedRequest> {
     let tokens = dictionary.synthesize(&request)?;
     let replay_request_id = if options.preserve_request_ids {
@@ -335,6 +370,7 @@ fn prepare_request(
         agent_context: request.agent_context,
         input_tokens: request.input_tokens,
         output_tokens: request.output_tokens,
+        request_received_ms: request.request_received_ms,
     };
     Ok(PreparedRequest {
         metadata,
