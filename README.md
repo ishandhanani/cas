@@ -75,6 +75,8 @@ target/release/agent-loadgen replay trace.jsonl.gz \
 
 The target can be a base URL or a full `/v1/chat/completions` URL. Linux uses a one-shot `timerfd` backed by `CLOCK_MONOTONIC`; other platforms use Tokio's monotonic timer.
 
+Replay sends synthetic prompt IDs in `nvext.token_data`. Run Dynamo with its default Rust chat processor (`--dyn-chat-processor dynamo`). The Python SGLang processor rejects these requests because it cannot preserve the supplied prompt IDs.
+
 The default strict gates are 2 ms p99 and 5 ms maximum client-offer lag. The implementation records this as `dispatch_lag_ms`: the time at which the prepared request is submitted to the HTTP client, not a claim about when its bytes arrive at Dynamo. The maximum is checked at full measured precision; fixed-memory histograms provide the reported percentiles. `requests.jsonl` separates scheduler-wake lag, local-admission lag, client-offer lag, response time, and output-length fidelity.
 
 HTTP/2 prior knowledge is the default because one multiplexed connection avoids HTTP/1 connection-pool response serialization during bursts. Use `--http-transport auto` for a target that does not accept cleartext HTTP/2. Target-observed frontend arrival timing remains a separate `compare` diagnostic and gate.
