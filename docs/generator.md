@@ -13,17 +13,17 @@ active-agent slot -> root task -> model request
                                   +--subagent------child completion-> parent join
                                   +--swarm---------all children-----> parent join
                                   +--background----independent request
-                                  +--complete-----------------------> next root task in slot
+                                  +--complete model turn--> session close --> next root task in slot
 ```
 
-Generated traffic is closed-loop. The first task in each active-agent slot starts during the configured ramp-up. Every later request becomes ready only after all graph dependencies complete, plus its sampled virtual delay. When a root task completes, that slot releases its next root task after `restart_delay_ms`. Target response latency therefore controls the generated request rate. The scheduler can still run independent slots, tools, background requests, and sibling subagents concurrently. A blocking child or swarm joins the parent; a non-blocking child continues independently.
+Generated traffic is closed-loop. The first task in each active-agent slot starts during the configured ramp-up. Every later request becomes ready only after all graph dependencies complete, plus its sampled virtual delay. The final model turn has a positive output budget and `session_final = false`. Its dependent `SessionClose` node has zero logical output, no model token payload, no output budget, and `session_final = true`. When a root task closes, that slot releases its next root task after `restart_delay_ms`. Target response latency therefore controls the generated request rate. The scheduler can still run independent slots, tools, background requests, and sibling subagents concurrently. A blocking child or swarm joins the parent; a non-blocking child continues independently.
 
 The generator does not execute tools or generate meaningful text. Tool classes sample delay, result-token geometry, failure, and retry behavior. Those sampled outcomes and direct child-session IDs are recorded on their originating node in `scenario.json`.
 
 ## Minimal profile
 
 ```toml
-schema_version = 1
+schema_version = 2
 agent = "codex"
 seed = 42
 
@@ -108,8 +108,14 @@ error_probability = 0.08
 - `compaction.summary_input_tokens`: synthetic compaction-instruction tokens added to the compaction request.
 - `compaction.summary_output_tokens`: summary output length and summary size retained in the next context window.
 - `compaction.retained_recent_tokens`: recent non-stable context retained beside the summary.
+- `compaction.abort_probability`: probability that a logical compaction starts with one client-aborted physical attempt.
+- `compaction.retry_probability`: probability that a successful attempt is followed by a duplicate physical attempt.
+- `compaction.max_attempts`: maximum physical attempts per logical operation.
+- `compaction.abort_after_ms`: sampled delay before canceling an aborted attempt.
 
-Global, tool-catalog, repository, and session-environment blocks remain stable across compaction. The context window epoch and compaction metadata are recorded in the plan. Codex compaction nodes also emit `x-codex-turn-metadata` during execution. Current Dynamo frontends treat that header as opaque and do not copy it into request-trace `AgentContext`; captured-trace validation therefore gates the resulting KV topology and reports the unavailable metadata as a warning.
+Every logical compaction has a stable `operation_id` and `phase`. Its physical attempts increment `attempt` while reusing that identity. The expected effects are `no_mutation_aborted`, `apply_once`, and `duplicate_noop`. The default probabilities are zero, so normal Codex behavior emits one physical summary request. Compaction requests leave the wire output budget unset; `summary_output_tokens` controls the synthetic summary retained in later prompt shape, not a forced response length. Global, tool-catalog, repository, and session-environment blocks remain stable across compaction.
+
+The plan and per-request results assert the intended logical effects. A client abort only proves that the load generator canceled its wait; proving no engine cache mutation requires request-scoped engine telemetry joined after the run. Codex compaction attempts also emit `x-codex-turn-metadata`. Current Dynamo frontends treat that header as opaque and do not copy it into request-trace `AgentContext`; captured-trace validation therefore gates the resulting KV topology and reports unavailable metadata as a warning.
 
 ## Subagents and swarms
 
@@ -123,7 +129,7 @@ Children inherit the global and root-repository prefixes, receive a unique sessi
 
 ## Safety limits
 
-- `limits.max_nodes`: hard bound on model requests in the materialized graph.
+- `limits.max_nodes`: hard bound on physical model and lifecycle-control requests in the materialized graph.
 - `limits.max_sessions`: hard bound on root and child sessions.
 - `limits.max_total_input_tokens`: hard bound on the sum of request input lengths.
 

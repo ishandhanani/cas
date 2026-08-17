@@ -6,5 +6,6 @@ pub mod compare;
 pub mod replay;
 pub mod scenario;
 pub mod scheduler;
+pub mod telemetry;
 pub mod token_shape;
 pub mod trace;

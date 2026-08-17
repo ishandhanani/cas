@@ -5,6 +5,7 @@ use std::time::Duration;
 use agent_loadgen::compare::{CompareOptions, compare_traces};
 use agent_loadgen::replay::{ReplayOptions, run_generated_scenario, run_stored_replay};
 use agent_loadgen::scenario::{GeneratedScenario, GeneratorConfig};
+use agent_loadgen::telemetry::join_engine_telemetry;
 use agent_loadgen::token_shape::TokenDictionary;
 use agent_loadgen::trace::load_stored_trace;
 use anyhow::{Context, Result, bail};
@@ -53,18 +54,17 @@ async fn main() -> Result<()> {
             selection,
             tokens,
             store,
+            fidelity,
             max_in_flight,
             warmup_connections,
             http_transport,
             prepare_lookahead_ms,
             result_flush_interval,
-            serialize_sessions,
             max_dispatch_p99_ms,
             max_dispatch_max_ms,
             start_delay_ms,
             timeout_seconds,
             time_scale,
-            preserve_request_ids,
             headers,
         } => {
             let trace = load_stored_trace(
@@ -92,13 +92,16 @@ async fn main() -> Result<()> {
                     http_transport,
                     prepare_lookahead: Duration::from_millis(prepare_lookahead_ms),
                     result_flush_interval,
-                    serialize_sessions,
                     max_dispatch_p99_ms,
                     max_dispatch_max_ms,
                     start_delay: Duration::from_millis(start_delay_ms),
                     timeout: Duration::from_secs(timeout_seconds),
                     time_scale,
-                    preserve_request_ids,
+                    token_path_verified: fidelity.token_path_verified,
+                    engine_cache_mode: parse_key_values(
+                        fidelity.engine_cache_mode,
+                        "engine cache mode",
+                    )?,
                     static_headers: parse_headers(headers)?,
                 },
             )
@@ -115,6 +118,7 @@ async fn main() -> Result<()> {
             output,
             plan_only,
             tokens,
+            fidelity,
             max_in_flight,
             warmup_connections,
             http_transport,
@@ -169,13 +173,16 @@ async fn main() -> Result<()> {
                     http_transport,
                     prepare_lookahead: Duration::from_millis(1),
                     result_flush_interval,
-                    serialize_sessions: false,
                     max_dispatch_p99_ms,
                     max_dispatch_max_ms,
                     start_delay: Duration::from_millis(start_delay_ms),
                     timeout: Duration::from_secs(timeout_seconds),
                     time_scale,
-                    preserve_request_ids: false,
+                    token_path_verified: fidelity.token_path_verified,
+                    engine_cache_mode: parse_key_values(
+                        fidelity.engine_cache_mode,
+                        "engine cache mode",
+                    )?,
                     static_headers: parse_headers(headers)?,
                 },
             )
@@ -208,6 +215,14 @@ async fn main() -> Result<()> {
                 bail!("replay fidelity comparison failed");
             }
         }
+        Command::JoinTelemetry {
+            requests,
+            engine_telemetry,
+            output,
+        } => {
+            let summary = join_engine_telemetry(&requests, &engine_telemetry, &output)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
     }
     Ok(())
 }
@@ -223,6 +238,24 @@ fn parse_headers(headers: Vec<String>) -> Result<Vec<(String, String)>> {
                 bail!("header name must not be empty");
             }
             Ok((name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn parse_key_values(
+    values: Vec<String>,
+    label: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    values
+        .into_iter()
+        .map(|value| {
+            let (name, setting) = value
+                .split_once('=')
+                .with_context(|| format!("{label} {value:?} must use NAME=VALUE"))?;
+            if name.is_empty() || setting.is_empty() {
+                bail!("{label} names and values must not be empty");
+            }
+            Ok((name.to_string(), setting.to_string()))
         })
         .collect()
 }

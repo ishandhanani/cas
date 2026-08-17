@@ -90,6 +90,17 @@ pub struct TraceStoreArgs {
     pub trace_request_batch_size: usize,
 }
 
+#[derive(Debug, Args)]
+pub struct FidelityArgs {
+    /// Declare that supplied token IDs reach the engine without re-tokenization.
+    #[arg(long)]
+    pub token_path_verified: bool,
+
+    /// Declare one engine cache setting as NAME=VALUE. Repeat for more settings.
+    #[arg(long = "engine-cache-mode")]
+    pub engine_cache_mode: Vec<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Check that a trace has all shape-replay fields.
@@ -139,6 +150,9 @@ pub enum Command {
         #[command(flatten)]
         store: TraceStoreArgs,
 
+        #[command(flatten)]
+        fidelity: FidelityArgs,
+
         /// Maximum simultaneous HTTP requests.
         #[arg(long, default_value_t = 4096)]
         max_in_flight: usize,
@@ -159,10 +173,6 @@ pub enum Command {
         #[arg(long, default_value_t = 1)]
         result_flush_interval: usize,
 
-        /// Wait for each prior same-session response. This transforms recorded timing.
-        #[arg(long)]
-        serialize_sessions: bool,
-
         /// Maximum allowed p99 client-offer lag.
         #[arg(long, default_value_t = 2.0)]
         max_dispatch_p99_ms: f64,
@@ -182,10 +192,6 @@ pub enum Command {
         /// Divide recorded arrival offsets by this value.
         #[arg(long, default_value_t = 1.0)]
         time_scale: f64,
-
-        /// Use source request IDs as x-request-id values.
-        #[arg(long)]
-        preserve_request_ids: bool,
 
         /// Add a static target header as NAME=VALUE. Repeat the flag for more headers.
         #[arg(long = "header")]
@@ -216,6 +222,9 @@ pub enum Command {
 
         #[command(flatten)]
         tokens: TokenArgs,
+
+        #[command(flatten)]
+        fidelity: FidelityArgs,
 
         /// Maximum simultaneous HTTP requests.
         #[arg(long, default_value_t = 256)]
@@ -283,5 +292,20 @@ pub enum Command {
         /// Maximum allowed frontend arrival error.
         #[arg(long, default_value_t = 20.0)]
         max_arrival_max_ms: f64,
+    },
+
+    /// Join request results with normalized engine telemetry by request ID.
+    JoinTelemetry {
+        /// requests.jsonl from a replay or generated run.
+        #[arg(long)]
+        requests: PathBuf,
+
+        /// Engine telemetry JSONL. Repeat for more files.
+        #[arg(long = "engine-telemetry", required = true)]
+        engine_telemetry: Vec<PathBuf>,
+
+        /// Joined JSONL output path.
+        #[arg(long)]
+        output: PathBuf,
     },
 }

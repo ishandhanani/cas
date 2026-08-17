@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-schema_version = 1
+schema_version = 2
 agent = "codex"
 seed = 42
 
@@ -39,6 +39,10 @@ trigger_fraction = 0.78
 summary_input_tokens = { kind = "uniform", min = 256, max = 1024 }
 summary_output_tokens = { kind = "uniform", min = 512, max = 2048 }
 retained_recent_tokens = 8192
+abort_probability = 0.0
+retry_probability = 0.0
+max_attempts = 3
+abort_after_ms = { kind = "fixed", value = 10 }
 
 [subagents]
 max_depth = 2

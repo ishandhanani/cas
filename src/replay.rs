@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -12,15 +12,17 @@ use clap::ValueEnum;
 use futures_util::StreamExt;
 use hdrhistogram::Histogram;
 use reqwest::header::{HeaderName, HeaderValue};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::{AgentKind, agent_headers};
 use crate::clock::{TIMER_BACKEND, sleep_until};
-use crate::scenario::GeneratedScenario;
+use crate::scenario::{
+    CompactionExpectedEffect, GeneratedCompactionAttempt, GeneratedNodeKind, GeneratedScenario,
+};
 use crate::scheduler::ReadyQueue;
 use crate::token_shape::{TokenDictionary, TokenDictionaryManifest};
 use crate::trace::{
@@ -46,17 +48,17 @@ pub struct ReplayOptions {
     pub http_transport: HttpTransport,
     pub prepare_lookahead: Duration,
     pub result_flush_interval: usize,
-    pub serialize_sessions: bool,
     pub max_dispatch_p99_ms: f64,
     pub max_dispatch_max_ms: f64,
     pub start_delay: Duration,
     pub timeout: Duration,
     pub time_scale: f64,
-    pub preserve_request_ids: bool,
+    pub token_path_verified: bool,
+    pub engine_cache_mode: BTreeMap<String, String>,
     pub static_headers: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RequestResult {
     pub ordinal: usize,
     pub source_request_id: String,
@@ -71,9 +73,16 @@ pub struct RequestResult {
     pub dispatch_lag_ms: f64,
     pub local_admission_lag_ms: f64,
     pub expected_input_tokens: usize,
-    pub expected_output_tokens: u32,
+    pub request_kind: GeneratedNodeKind,
+    pub expected_output_tokens: Option<u32>,
     pub observed_output_tokens: Option<u64>,
     pub output_length_match: Option<bool>,
+    pub control_only_match: Option<bool>,
+    pub compaction_operation_id: Option<String>,
+    pub compaction_phase: Option<String>,
+    pub compaction_attempt: Option<usize>,
+    pub compaction_expected_effect: Option<CompactionExpectedEffect>,
+    pub planned_abort_match: Option<bool>,
     pub status_code: Option<u16>,
     pub ttft_ms: Option<f64>,
     pub total_time_ms: f64,
@@ -94,20 +103,30 @@ pub struct RunSummary {
     pub http_transport: HttpTransport,
     pub prepare_lookahead_ms: u64,
     pub result_flush_interval: usize,
-    pub serialize_sessions: bool,
     pub max_dispatch_p99_ms: f64,
     pub max_dispatch_max_ms: f64,
     pub timer_backend: &'static str,
     pub static_header_names: Vec<String>,
+    #[serde(flatten)]
+    pub fidelity: FidelityLabels,
     pub source: TraceManifest,
     pub source_storage: Option<TraceStorageManifest>,
     pub token_dictionary: TokenDictionaryManifest,
     pub request_count: usize,
+    pub model_turns: usize,
+    pub session_closes: usize,
+    pub budgeted_model_turns: usize,
+    pub unbudgeted_model_turns: usize,
+    pub planned_aborts: usize,
     pub succeeded: usize,
     pub failed: usize,
     pub output_length_matches: usize,
     pub output_length_mismatches: usize,
     pub missing_output_usage: usize,
+    pub control_only_matches: usize,
+    pub control_only_mismatches: usize,
+    pub planned_abort_matches: usize,
+    pub planned_abort_mismatches: usize,
     pub scheduler_wake_lag_ms: Percentiles,
     pub dispatch_lag_ms: Percentiles,
     pub local_admission_lag_ms: Percentiles,
@@ -115,6 +134,31 @@ pub struct RunSummary {
     pub dispatch_timing_matches: bool,
     pub passed: bool,
     pub total_time_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolSurface {
+    ChatCompletions,
+    Responses,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrafficKind {
+    SyntheticKvShape,
+    CapturedTrace,
+    NativeAgent,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FidelityLabels {
+    pub protocol_surface: ProtocolSurface,
+    pub traffic_kind: TrafficKind,
+    pub token_path_verified: bool,
+    pub engine_cache_mode: BTreeMap<String, String>,
+    pub capacity_performance_conclusions_allowed: bool,
+    pub conclusion_blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -135,15 +179,9 @@ struct ReplayContext {
 struct PreparedRequest {
     metadata: PreparedMetadata,
     http_request: reqwest::Request,
-    session_gate: Option<Arc<Mutex<SessionGate>>>,
 }
 
-#[derive(Default)]
-struct SessionGate {
-    last_request_received_ms: Option<u64>,
-    last_completed_at: Option<Instant>,
-}
-
+#[derive(Clone)]
 struct PreparedMetadata {
     ordinal: usize,
     source_request_id: String,
@@ -151,8 +189,15 @@ struct PreparedMetadata {
     replay_request_id: String,
     agent_context: Option<AgentContext>,
     input_tokens: usize,
-    output_tokens: u32,
-    request_received_ms: u64,
+    request_kind: GeneratedNodeKind,
+    expected_output_tokens: Option<u32>,
+    compaction_attempt: Option<GeneratedCompactionAttempt>,
+}
+
+struct RequestExecution {
+    kind: GeneratedNodeKind,
+    output_budget_tokens: Option<u32>,
+    compaction_attempt: Option<GeneratedCompactionAttempt>,
 }
 
 trait RequestStream {
@@ -219,12 +264,6 @@ async fn run_replay_stream(
     options: ReplayOptions,
 ) -> Result<RunSummary> {
     validate_options(&options)?;
-    if source_manifest.zero_output_requests > 0 {
-        bail!(
-            "shape-strict replay does not support {} zero-output requests",
-            source_manifest.zero_output_requests
-        );
-    }
     prepare_open_file_limit(options.max_in_flight)?;
     fs::create_dir_all(&options.output_dir).with_context(|| {
         format!(
@@ -239,7 +278,6 @@ async fn run_replay_stream(
     let token_manifest = dictionary.manifest().clone();
     let mut pending = requests.next_request()?;
     let mut schedule = VecDeque::<(u64, PreparedRequest)>::new();
-    let mut session_gates = HashMap::<String, Arc<Mutex<SessionGate>>>::new();
     ReplayPreparationContext {
         dictionary: &dictionary,
         client: &client,
@@ -252,7 +290,6 @@ async fn run_replay_stream(
         &mut *requests,
         &mut pending,
         &mut schedule,
-        &mut session_gates,
         duration_ns(options.prepare_lookahead),
     )?;
     warm_connections(&client, &target, &options).await?;
@@ -290,7 +327,6 @@ async fn run_replay_stream(
             &mut *requests,
             &mut pending,
             &mut schedule,
-            &mut session_gates,
             prepare_horizon_ns,
         )?;
 
@@ -305,58 +341,22 @@ async fn run_replay_stream(
                 .checked_add(Duration::from_nanos(ready_at_ns))
                 .expect("the deadline was validated before queue release");
             let context = context.clone();
-            let task_semaphore = Arc::clone(&semaphore);
-            let session_gate = prepared.session_gate.clone();
-            let request_received_ms = prepared.metadata.request_received_ms;
-            let time_scale = options.time_scale;
-            let permit = if options.serialize_sessions {
-                None
-            } else {
-                match Arc::clone(&semaphore).try_acquire_owned() {
-                    Ok(permit) => Some(permit),
-                    Err(_) => {
-                        sink.record(admission_failure(
-                            &context,
-                            scheduled,
-                            scheduler_wake,
-                            ready_at_ns,
-                            prepared,
-                            options.max_in_flight,
-                        ))?;
-                        continue;
-                    }
+            let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    sink.record(admission_failure(
+                        &context,
+                        scheduled,
+                        scheduler_wake,
+                        ready_at_ns,
+                        prepared,
+                        options.max_in_flight,
+                    ))?;
+                    continue;
                 }
             };
             tasks.spawn(async move {
-                let mut session_guard = match session_gate {
-                    Some(gate) => Some(gate.lock_owned().await),
-                    None => None,
-                };
-                if let Some(gate) = session_guard.as_ref()
-                    && let (Some(previous_received_ms), Some(previous_completed_at)) =
-                        (gate.last_request_received_ms, gate.last_completed_at)
-                {
-                    let gap_ns = scaled_offset_ns(
-                        request_received_ms.saturating_sub(previous_received_ms),
-                        time_scale,
-                    )?;
-                    sleep_until(
-                        previous_completed_at
-                            .checked_add(Duration::from_nanos(gap_ns))
-                            .context(
-                                "the session replay delay exceeds the monotonic clock range",
-                            )?,
-                    )
-                    .await;
-                }
-                let permit = match permit {
-                    Some(permit) => permit,
-                    None => task_semaphore
-                        .acquire_owned()
-                        .await
-                        .context("the replay semaphore closed")?,
-                };
-                let result = send_request(
+                send_request(
                     &context,
                     scheduled,
                     scheduler_wake,
@@ -364,12 +364,7 @@ async fn run_replay_stream(
                     prepared,
                     permit,
                 )
-                .await;
-                if let Some(gate) = session_guard.as_mut() {
-                    gate.last_request_received_ms = Some(request_received_ms);
-                    gate.last_completed_at = Some(Instant::now());
-                }
-                result
+                .await
             });
             dispatched = true;
         }
@@ -424,6 +419,7 @@ async fn run_replay_stream(
     let summary = summarize(
         SummaryIdentity {
             workload_kind: "trace-replay",
+            traffic_kind: TrafficKind::CapturedTrace,
             run_id,
             target: &target,
             source_storage,
@@ -444,9 +440,6 @@ pub async fn run_generated_scenario(
     options: ReplayOptions,
 ) -> Result<RunSummary> {
     validate_options(&options)?;
-    if options.serialize_sessions {
-        bail!("generated scenarios use graph dependencies and cannot use serialize_sessions");
-    }
     if options.agent != scenario.config.agent {
         bail!("generated scenario agent does not match the request header adapter");
     }
@@ -474,7 +467,11 @@ pub async fn run_generated_scenario(
                 &options,
                 &dictionary,
                 node.request.clone(),
-                None,
+                RequestExecution {
+                    kind: node.kind,
+                    output_budget_tokens: node.output_budget_tokens,
+                    compaction_attempt: node.compaction_attempt.clone(),
+                },
             )
             .map(Some)
         })
@@ -601,6 +598,7 @@ pub async fn run_generated_scenario(
     let summary = summarize(
         SummaryIdentity {
             workload_kind: "generated-closed-loop",
+            traffic_kind: TrafficKind::SyntheticKvShape,
             run_id,
             target: &target,
             source_storage: None,
@@ -683,7 +681,6 @@ impl ReplayPreparationContext<'_> {
         requests: &mut dyn RequestStream,
         pending: &mut Option<TraceRequest>,
         schedule: &mut VecDeque<(u64, PreparedRequest)>,
-        session_gates: &mut HashMap<String, Arc<Mutex<SessionGate>>>,
         prepare_horizon_ns: u64,
     ) -> Result<()> {
         while let Some(request) = pending.as_ref() {
@@ -696,19 +693,21 @@ impl ReplayPreparationContext<'_> {
             }
             let request = pending.take().expect("the pending request exists");
             let ordinal = request.ordinal;
-            let session_gate = if self.options.serialize_sessions {
-                request.agent_context.as_ref().map(|context| {
-                    let gate = context
-                        .parent_session_id
-                        .as_ref()
-                        .and_then(|parent| session_gates.get(parent))
-                        .cloned()
-                        .unwrap_or_else(|| Arc::new(Mutex::new(SessionGate::default())));
-                    session_gates.insert(context.session_id.clone(), Arc::clone(&gate));
-                    gate
-                })
+            let kind = if request.is_session_close() {
+                GeneratedNodeKind::SessionClose
+            } else if request.output_tokens == 0 {
+                bail!(
+                    "request {} has zero output but is not a session-final control request",
+                    request.source_request_id
+                );
             } else {
-                None
+                GeneratedNodeKind::ModelTurn
+            };
+            let execution = RequestExecution {
+                kind,
+                output_budget_tokens: (kind == GeneratedNodeKind::ModelTurn)
+                    .then_some(request.output_tokens),
+                compaction_attempt: None,
             };
             let prepared = prepare_request(
                 self.client,
@@ -717,7 +716,7 @@ impl ReplayPreparationContext<'_> {
                 self.options,
                 self.dictionary,
                 request,
-                session_gate,
+                execution,
             )?;
             if let Some((previous_ready_at_ns, previous)) = schedule.back()
                 && (*previous_ready_at_ns, previous.metadata.ordinal) > (ready_at_ns, ordinal)
@@ -738,15 +737,10 @@ fn prepare_request(
     options: &ReplayOptions,
     dictionary: &TokenDictionary,
     request: TraceRequest,
-    session_gate: Option<Arc<Mutex<SessionGate>>>,
+    execution: RequestExecution,
 ) -> Result<PreparedRequest> {
-    let tokens = dictionary.synthesize(&request)?;
-    let replay_request_id = if options.preserve_request_ids {
-        request.source_request_id.clone()
-    } else {
-        format!("agent-loadgen-{run_id}-{}", request.ordinal)
-    };
-    let body = json!({
+    let replay_request_id = format!("agent-loadgen-{run_id}-{}", request.ordinal);
+    let mut body = json!({
         "model": options.model,
         "messages": messages_for_trigger(
             request
@@ -756,11 +750,16 @@ fn prepare_request(
         ),
         "stream": true,
         "stream_options": {"include_usage": true},
-        "max_tokens": request.output_tokens,
-        "ignore_eos": true,
-        "temperature": 0.0,
-        "nvext": {"token_data": tokens}
+        "temperature": 0.0
     });
+    if execution.kind == GeneratedNodeKind::ModelTurn {
+        let tokens = dictionary.synthesize(&request)?;
+        body["nvext"] = json!({"token_data": tokens});
+    }
+    if let Some(output_budget_tokens) = execution.output_budget_tokens {
+        body["max_tokens"] = json!(output_budget_tokens);
+        body["ignore_eos"] = json!(true);
+    }
 
     let mut builder = client
         .post(target)
@@ -782,13 +781,13 @@ fn prepare_request(
         replay_request_id,
         agent_context: request.agent_context,
         input_tokens: request.input_tokens,
-        output_tokens: request.output_tokens,
-        request_received_ms: request.request_received_ms,
+        request_kind: execution.kind,
+        expected_output_tokens: execution.output_budget_tokens,
+        compaction_attempt: execution.compaction_attempt,
     };
     Ok(PreparedRequest {
         metadata,
         http_request,
-        session_gate,
     })
 }
 
@@ -927,7 +926,7 @@ async fn send_request(
     _permit: OwnedSemaphorePermit,
 ) -> Result<RequestResult> {
     let dispatch = Instant::now();
-    let mut result = request_result_shell(
+    let result = request_result_shell(
         context,
         scheduled,
         scheduler_wake,
@@ -935,7 +934,41 @@ async fn send_request(
         &prepared,
         dispatch,
     );
-    let expected_output_tokens = prepared.metadata.output_tokens;
+    let abort_after_ms = prepared
+        .metadata
+        .compaction_attempt
+        .as_ref()
+        .and_then(|attempt| attempt.abort_after_ms);
+    let request = perform_request(context, dispatch, prepared, result.clone());
+    if let Some(abort_after_ms) = abort_after_ms {
+        return match tokio::time::timeout(Duration::from_millis(abort_after_ms), request).await {
+            Err(_) => {
+                let mut aborted = result;
+                aborted.total_time_ms = millis(dispatch.elapsed());
+                aborted.planned_abort_match = Some(true);
+                Ok(aborted)
+            }
+            Ok(result) => {
+                let mut completed = result?;
+                completed.planned_abort_match = Some(false);
+                completed.error = Some(format!(
+                    "planned compaction abort after {abort_after_ms} ms completed before cancellation"
+                ));
+                Ok(completed)
+            }
+        };
+    }
+    request.await
+}
+
+async fn perform_request(
+    context: &ReplayContext,
+    dispatch: Instant,
+    prepared: PreparedRequest,
+    mut result: RequestResult,
+) -> Result<RequestResult> {
+    let expected_output_tokens = prepared.metadata.expected_output_tokens;
+    let request_kind = prepared.metadata.request_kind;
     let response = context.client.execute(prepared.http_request).await;
     let response = match response {
         Ok(response) => response,
@@ -964,9 +997,17 @@ async fn send_request(
         Ok(stream) => {
             result.ttft_ms = stream.ttft_ms;
             result.observed_output_tokens = stream.output_tokens;
-            result.output_length_match = stream
-                .output_tokens
-                .map(|tokens| tokens == expected_output_tokens as u64);
+            match request_kind {
+                GeneratedNodeKind::ModelTurn => {
+                    result.output_length_match = expected_output_tokens.and_then(|expected| {
+                        stream.output_tokens.map(|tokens| tokens == expected as u64)
+                    });
+                }
+                GeneratedNodeKind::SessionClose => {
+                    result.control_only_match =
+                        Some(stream.ttft_ms.is_none() && stream.output_tokens.unwrap_or(0) == 0);
+                }
+            }
         }
         Err(error) => result.error = Some(error.to_string()),
     }
@@ -1034,9 +1075,32 @@ fn request_result_shell(
         dispatch_lag_ms,
         local_admission_lag_ms,
         expected_input_tokens: prepared.metadata.input_tokens,
-        expected_output_tokens: prepared.metadata.output_tokens,
+        request_kind: prepared.metadata.request_kind,
+        expected_output_tokens: prepared.metadata.expected_output_tokens,
         observed_output_tokens: None,
         output_length_match: None,
+        control_only_match: None,
+        compaction_operation_id: prepared
+            .metadata
+            .compaction_attempt
+            .as_ref()
+            .map(|attempt| attempt.operation_id.clone()),
+        compaction_phase: prepared
+            .metadata
+            .compaction_attempt
+            .as_ref()
+            .map(|attempt| attempt.phase.clone()),
+        compaction_attempt: prepared
+            .metadata
+            .compaction_attempt
+            .as_ref()
+            .map(|attempt| attempt.attempt),
+        compaction_expected_effect: prepared
+            .metadata
+            .compaction_attempt
+            .as_ref()
+            .map(|attempt| attempt.expected_effect),
+        planned_abort_match: None,
         status_code: None,
         ttft_ms: None,
         total_time_ms: 0.0,
@@ -1221,9 +1285,18 @@ impl ResultSink {
 struct RunAccumulator {
     request_count: usize,
     succeeded: usize,
+    model_turns: usize,
+    session_closes: usize,
+    budgeted_model_turns: usize,
+    unbudgeted_model_turns: usize,
+    planned_aborts: usize,
     output_length_matches: usize,
     output_length_mismatches: usize,
     missing_output_usage: usize,
+    control_only_matches: usize,
+    control_only_mismatches: usize,
+    planned_abort_matches: usize,
+    planned_abort_mismatches: usize,
     scheduler_wake_lag_us: Histogram<u64>,
     dispatch_lag_us: Histogram<u64>,
     local_admission_lag_us: Histogram<u64>,
@@ -1237,9 +1310,18 @@ impl RunAccumulator {
         Ok(Self {
             request_count: 0,
             succeeded: 0,
+            model_turns: 0,
+            session_closes: 0,
+            budgeted_model_turns: 0,
+            unbudgeted_model_turns: 0,
+            planned_aborts: 0,
             output_length_matches: 0,
             output_length_mismatches: 0,
             missing_output_usage: 0,
+            control_only_matches: 0,
+            control_only_mismatches: 0,
+            planned_abort_matches: 0,
+            planned_abort_mismatches: 0,
             scheduler_wake_lag_us: Histogram::new(3)?,
             dispatch_lag_us: Histogram::new(3)?,
             local_admission_lag_us: Histogram::new(3)?,
@@ -1251,13 +1333,40 @@ impl RunAccumulator {
 
     fn record(&mut self, result: &RequestResult) -> Result<()> {
         self.request_count += 1;
-        if result.error.is_none() && result.status_code.is_some_and(|status| status < 400) {
+        let planned_abort_succeeded = result.planned_abort_match == Some(true);
+        if planned_abort_succeeded
+            || (result.error.is_none() && result.status_code.is_some_and(|status| status < 400))
+        {
             self.succeeded += 1;
         }
-        match result.output_length_match {
-            Some(true) => self.output_length_matches += 1,
-            Some(false) => self.output_length_mismatches += 1,
-            None => self.missing_output_usage += 1,
+        match result.request_kind {
+            GeneratedNodeKind::ModelTurn => {
+                self.model_turns += 1;
+                if result.expected_output_tokens.is_some() {
+                    self.budgeted_model_turns += 1;
+                    match result.output_length_match {
+                        Some(true) => self.output_length_matches += 1,
+                        Some(false) => self.output_length_mismatches += 1,
+                        None => self.missing_output_usage += 1,
+                    }
+                } else {
+                    self.unbudgeted_model_turns += 1;
+                }
+            }
+            GeneratedNodeKind::SessionClose => {
+                self.session_closes += 1;
+                match result.control_only_match {
+                    Some(true) => self.control_only_matches += 1,
+                    Some(false) | None => self.control_only_mismatches += 1,
+                }
+            }
+        }
+        if result.compaction_expected_effect == Some(CompactionExpectedEffect::NoMutationAborted) {
+            self.planned_aborts += 1;
+            match result.planned_abort_match {
+                Some(true) => self.planned_abort_matches += 1,
+                Some(false) | None => self.planned_abort_mismatches += 1,
+            }
         }
         record_milliseconds(
             &mut self.scheduler_wake_lag_us,
@@ -1303,6 +1412,7 @@ fn histogram_percentiles(histogram: &Histogram<u64>) -> Percentiles {
 
 struct SummaryIdentity<'a> {
     workload_kind: &'static str,
+    traffic_kind: TrafficKind,
     run_id: String,
     target: &'a str,
     source_storage: Option<TraceStorageManifest>,
@@ -1324,10 +1434,27 @@ fn summarize(
     let local_admission_lag_ms = histogram_percentiles(&accumulator.local_admission_lag_us);
     let request_fidelity_matches = accumulator.request_count == source.request_count
         && accumulator.succeeded == source.request_count
-        && accumulator.output_length_matches == source.request_count
-        && accumulator.missing_output_usage == 0;
+        && accumulator.output_length_matches == accumulator.budgeted_model_turns
+        && accumulator.missing_output_usage == 0
+        && accumulator.control_only_matches == accumulator.session_closes
+        && accumulator.planned_abort_matches == accumulator.planned_aborts;
     let dispatch_timing_matches = dispatch_timing_matches(accumulator, options.max_dispatch_max_ms);
     let passed = request_fidelity_matches && dispatch_timing_matches;
+    let mut conclusion_blockers = Vec::new();
+    if !options.token_path_verified {
+        conclusion_blockers.push("token_path_unverified".to_string());
+    }
+    if options.engine_cache_mode.is_empty() {
+        conclusion_blockers.push("engine_cache_mode_undeclared".to_string());
+    }
+    let fidelity = FidelityLabels {
+        protocol_surface: ProtocolSurface::ChatCompletions,
+        traffic_kind: identity.traffic_kind,
+        token_path_verified: options.token_path_verified,
+        engine_cache_mode: options.engine_cache_mode.clone(),
+        capacity_performance_conclusions_allowed: conclusion_blockers.is_empty(),
+        conclusion_blockers,
+    };
 
     RunSummary {
         workload_kind: identity.workload_kind,
@@ -1341,7 +1468,6 @@ fn summarize(
         http_transport: options.http_transport,
         prepare_lookahead_ms: options.prepare_lookahead.as_millis().min(u64::MAX as u128) as u64,
         result_flush_interval: options.result_flush_interval,
-        serialize_sessions: options.serialize_sessions,
         max_dispatch_p99_ms: options.max_dispatch_p99_ms,
         max_dispatch_max_ms: options.max_dispatch_max_ms,
         timer_backend: TIMER_BACKEND,
@@ -1350,15 +1476,25 @@ fn summarize(
             .iter()
             .map(|(name, _)| name.clone())
             .collect(),
+        fidelity,
         source: source.clone(),
         source_storage: identity.source_storage,
         token_dictionary: dictionary.clone(),
         request_count: accumulator.request_count,
+        model_turns: accumulator.model_turns,
+        session_closes: accumulator.session_closes,
+        budgeted_model_turns: accumulator.budgeted_model_turns,
+        unbudgeted_model_turns: accumulator.unbudgeted_model_turns,
+        planned_aborts: accumulator.planned_aborts,
         succeeded: accumulator.succeeded,
         failed: accumulator.request_count - accumulator.succeeded,
         output_length_matches: accumulator.output_length_matches,
         output_length_mismatches: accumulator.output_length_mismatches,
         missing_output_usage: accumulator.missing_output_usage,
+        control_only_matches: accumulator.control_only_matches,
+        control_only_mismatches: accumulator.control_only_mismatches,
+        planned_abort_matches: accumulator.planned_abort_matches,
+        planned_abort_mismatches: accumulator.planned_abort_mismatches,
         scheduler_wake_lag_ms,
         dispatch_lag_ms,
         local_admission_lag_ms,
@@ -1486,6 +1622,20 @@ mod tests {
         Json(body): Json<serde_json::Value>,
     ) -> Response<Body> {
         *capture.0.lock().unwrap() = Some((headers, body));
+        if capture
+            .0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|(headers, _)| headers.get("x-dynamo-session-final"))
+            .is_some_and(|value| value == "true")
+        {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from("data: [DONE]\n\n"))
+                .unwrap();
+        }
         Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
@@ -1561,13 +1711,13 @@ mod tests {
                 http_transport: HttpTransport::Http2PriorKnowledge,
                 prepare_lookahead: Duration::from_millis(100),
                 result_flush_interval: 1,
-                serialize_sessions: false,
                 max_dispatch_p99_ms: 100.0,
                 max_dispatch_max_ms: 100.0,
                 start_delay: Duration::from_millis(5),
                 timeout: Duration::from_secs(5),
                 time_scale: 1.0,
-                preserve_request_ids: false,
+                token_path_verified: false,
+                engine_cache_mode: BTreeMap::new(),
                 static_headers: Vec::new(),
             },
         )
@@ -1607,6 +1757,107 @@ mod tests {
         assert_eq!(body["nvext"]["token_data"].as_array().unwrap().len(), 3);
         assert!(output.path().join("run.json").is_file());
         assert!(output.path().join("requests.jsonl").is_file());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn replay_sends_session_close_without_model_shape() {
+        let capture = Capture::default();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(shape_endpoint))
+            .with_state(capture.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let request = TraceRequest {
+            ordinal: 0,
+            source_request_id: "source-close".to_string(),
+            source_x_request_id: None,
+            source_model: None,
+            input_tokens: 3,
+            output_tokens: 0,
+            request_received_ms: 1000,
+            trace_block_size: 16,
+            input_sequence_hashes: vec![11],
+            agent_context: Some(AgentContext {
+                session_id: "thread-1".to_string(),
+                parent_session_id: None,
+                session_final: Some(true),
+                compaction: None,
+                input_trigger: Some("other".to_string()),
+            }),
+        };
+        let trace = LoadedTrace {
+            requests: vec![request.clone()],
+            manifest: TraceManifest {
+                request_count: 1,
+                zero_output_requests: 1,
+                session_count: 1,
+                requests_with_agent_context: 1,
+                first_request_received_ms: 1000,
+                last_request_received_ms: 1000,
+                duration_ms: 0,
+                input_tokens: 3,
+                output_tokens: 0,
+                distinct_sequence_hashes: 1,
+                trace_block_size: 16,
+                source_digest_sha256: "source".to_string(),
+            },
+        };
+        let dictionary = TokenDictionary::build(
+            &[request],
+            SafeTokenAlphabet::from_unverified_range(100, 1024, &[]).unwrap(),
+        )
+        .unwrap();
+        let output = tempdir().unwrap();
+        let summary = run_replay(
+            trace,
+            dictionary,
+            ReplayOptions {
+                agent: AgentKind::Codex,
+                model: "test-model".to_string(),
+                target: format!("http://{address}"),
+                output_dir: output.path().to_path_buf(),
+                max_in_flight: 1,
+                warmup_connections: 0,
+                http_transport: HttpTransport::Http2PriorKnowledge,
+                prepare_lookahead: Duration::from_millis(100),
+                result_flush_interval: 1,
+                max_dispatch_p99_ms: 100.0,
+                max_dispatch_max_ms: 100.0,
+                start_delay: Duration::from_millis(5),
+                timeout: Duration::from_secs(5),
+                time_scale: 1.0,
+                token_path_verified: true,
+                engine_cache_mode: BTreeMap::from([(
+                    "ownership".to_string(),
+                    "session".to_string(),
+                )]),
+                static_headers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.model_turns, 0);
+        assert_eq!(summary.session_closes, 1);
+        assert_eq!(summary.control_only_matches, 1);
+        assert!(summary.passed);
+        assert!(summary.fidelity.capacity_performance_conclusions_allowed);
+        let (headers, body) = capture.0.lock().unwrap().clone().unwrap();
+        assert_eq!(headers.get("x-dynamo-session-final").unwrap(), "true");
+        assert!(body.get("nvext").is_none());
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("ignore_eos").is_none());
+        let run: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(output.path().join("run.json")).unwrap())
+                .unwrap();
+        assert_eq!(run["protocol_surface"], "chat_completions");
+        assert_eq!(run["traffic_kind"], "captured_trace");
+        assert_eq!(run["token_path_verified"], true);
+        assert_eq!(run["engine_cache_mode"]["ownership"], "session");
+        assert!(run.get("fidelity").is_none());
         server.abort();
     }
 
@@ -1676,13 +1927,13 @@ mod tests {
                 http_transport: HttpTransport::Auto,
                 prepare_lookahead: Duration::from_millis(100),
                 result_flush_interval: 1,
-                serialize_sessions: false,
                 max_dispatch_p99_ms: 100.0,
                 max_dispatch_max_ms: 100.0,
                 start_delay: Duration::from_millis(25),
                 timeout: Duration::from_secs(5),
                 time_scale: 1.0,
-                preserve_request_ids: false,
+                token_path_verified: false,
+                engine_cache_mode: BTreeMap::new(),
                 static_headers: Vec::new(),
             },
         )
@@ -1707,7 +1958,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let config: GeneratorConfig = toml::from_str(
             r#"
-                schema_version = 1
+                schema_version = 2
                 agent = "codex"
                 seed = 9
 
@@ -1743,8 +1994,9 @@ mod tests {
         )
         .unwrap();
         let scenario = GeneratedScenario::generate(config.resolve().unwrap()).unwrap();
-        assert_eq!(scenario.nodes.len(), 2);
+        assert_eq!(scenario.nodes.len(), 3);
         assert_eq!(scenario.nodes[1].dependencies, vec![0]);
+        assert_eq!(scenario.nodes[2].dependencies, vec![1]);
         let dictionary = TokenDictionary::new(
             scenario.trace_manifest.trace_block_size,
             scenario.trace_manifest.distinct_sequence_hashes,
@@ -1765,20 +2017,22 @@ mod tests {
                 http_transport: HttpTransport::Auto,
                 prepare_lookahead: Duration::from_millis(1),
                 result_flush_interval: 1,
-                serialize_sessions: false,
                 max_dispatch_p99_ms: 100.0,
                 max_dispatch_max_ms: 100.0,
                 start_delay: Duration::from_millis(5),
                 timeout: Duration::from_secs(5),
                 time_scale: 100.0,
-                preserve_request_ids: false,
+                token_path_verified: false,
+                engine_cache_mode: BTreeMap::new(),
                 static_headers: Vec::new(),
             },
         )
         .await
         .unwrap();
         assert_eq!(summary.workload_kind, "generated-closed-loop");
-        assert_eq!(summary.succeeded, 2);
+        assert_eq!(summary.succeeded, 3);
+        assert_eq!(summary.model_turns, 2);
+        assert_eq!(summary.session_closes, 1);
         assert!(summary.passed);
         assert!(output.path().join("scenario.json").is_file());
         server.abort();

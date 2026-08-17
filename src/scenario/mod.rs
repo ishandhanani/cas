@@ -6,4 +6,7 @@ mod config;
 mod plan;
 
 pub use config::{GeneratorConfig, ResolvedGeneratorConfig};
-pub use plan::{GeneratedNode, GeneratedScenario, GeneratedSession, GeneratedToolEvent};
+pub use plan::{
+    CompactionExpectedEffect, GeneratedCompactionAttempt, GeneratedCompactionOperation,
+    GeneratedNode, GeneratedNodeKind, GeneratedScenario, GeneratedSession, GeneratedToolEvent,
+};

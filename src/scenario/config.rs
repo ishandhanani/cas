@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentKind;
 
-pub const GENERATOR_SCHEMA_VERSION: u32 = 1;
+pub const GENERATOR_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +92,10 @@ pub struct CompactionOverrides {
     pub summary_input_tokens: Option<UIntDistribution>,
     pub summary_output_tokens: Option<UIntDistribution>,
     pub retained_recent_tokens: Option<usize>,
+    pub abort_probability: Option<f64>,
+    pub retry_probability: Option<f64>,
+    pub max_attempts: Option<usize>,
+    pub abort_after_ms: Option<UIntDistribution>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -253,6 +257,10 @@ pub struct ResolvedGeneratorConfig {
     pub summary_input_tokens: UIntDistribution,
     pub summary_output_tokens: UIntDistribution,
     pub retained_recent_tokens: usize,
+    pub compaction_abort_probability: f64,
+    pub compaction_retry_probability: f64,
+    pub compaction_max_attempts: usize,
+    pub compaction_abort_after_ms: UIntDistribution,
     pub max_depth: usize,
     pub fanout: UIntDistribution,
     pub spawn_delay_ms: UIntDistribution,
@@ -356,6 +364,22 @@ impl GeneratorConfig {
             &mut resolved.retained_recent_tokens,
             self.compaction.retained_recent_tokens,
         );
+        replace(
+            &mut resolved.compaction_abort_probability,
+            self.compaction.abort_probability,
+        );
+        replace(
+            &mut resolved.compaction_retry_probability,
+            self.compaction.retry_probability,
+        );
+        replace(
+            &mut resolved.compaction_max_attempts,
+            self.compaction.max_attempts,
+        );
+        replace(
+            &mut resolved.compaction_abort_after_ms,
+            self.compaction.abort_after_ms,
+        );
         replace(&mut resolved.max_depth, self.subagents.max_depth);
         replace(&mut resolved.subagent_turns, self.subagents.turns);
         replace(&mut resolved.fanout, self.subagents.fanout);
@@ -430,6 +454,10 @@ impl ResolvedGeneratorConfig {
             summary_input_tokens: UIntDistribution::uniform(256, 1024),
             summary_output_tokens: UIntDistribution::uniform(512, 2048),
             retained_recent_tokens: 8_192,
+            compaction_abort_probability: 0.0,
+            compaction_retry_probability: 0.0,
+            compaction_max_attempts: 3,
+            compaction_abort_after_ms: UIntDistribution::fixed(10),
             max_depth: 2,
             fanout: UIntDistribution::uniform(2, 4),
             spawn_delay_ms: UIntDistribution::uniform(5, 100),
@@ -479,6 +507,7 @@ impl ResolvedGeneratorConfig {
             ("tool result tokens", &self.tool_result_tokens),
             ("summary input tokens", &self.summary_input_tokens),
             ("summary output tokens", &self.summary_output_tokens),
+            ("compaction abort delay", &self.compaction_abort_after_ms),
             ("subagent fanout", &self.fanout),
             ("spawn delay", &self.spawn_delay_ms),
             ("parallel tool count", &self.parallel_count),
@@ -517,8 +546,24 @@ impl ResolvedGeneratorConfig {
             ),
             ("blocking_probability", self.blocking_probability),
             ("retry_probability", self.retry_probability),
+            (
+                "compaction_abort_probability",
+                self.compaction_abort_probability,
+            ),
+            (
+                "compaction_retry_probability",
+                self.compaction_retry_probability,
+            ),
         ] {
             validate_probability(name, probability)?;
+        }
+        if self.compaction_max_attempts == 0 {
+            bail!("compaction_max_attempts must be greater than zero");
+        }
+        if (self.compaction_abort_probability > 0.0 || self.compaction_retry_probability > 0.0)
+            && self.compaction_max_attempts < 2
+        {
+            bail!("compaction_max_attempts must be at least two when retries are enabled");
         }
         let action_total = self.tool_probability
             + self.parallel_tool_probability
@@ -606,7 +651,7 @@ mod tests {
     fn rejects_trajectories_that_can_have_zero_turns() {
         let config: GeneratorConfig = toml::from_str(
             r#"
-                schema_version = 1
+                schema_version = 2
                 agent = "codex"
 
                 [trajectory]

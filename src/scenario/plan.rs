@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::config::{GENERATOR_SCHEMA_VERSION, ResolvedGeneratorConfig, ToolClass};
@@ -19,6 +19,7 @@ pub struct GeneratedScenario {
     pub config: ResolvedGeneratorConfig,
     pub sessions: Vec<GeneratedSession>,
     pub nodes: Vec<GeneratedNode>,
+    pub compaction_operations: Vec<GeneratedCompactionOperation>,
     pub trace_manifest: TraceManifest,
 }
 
@@ -33,6 +34,7 @@ pub struct GeneratedSession {
 #[derive(Debug, Clone, Serialize)]
 pub struct GeneratedNode {
     pub node_id: String,
+    pub kind: GeneratedNodeKind,
     pub action: String,
     pub dependencies: Vec<usize>,
     pub delay_after_dependencies_ms: u64,
@@ -40,7 +42,43 @@ pub struct GeneratedNode {
     pub window_epoch: usize,
     pub tool_events: Vec<GeneratedToolEvent>,
     pub spawned_session_ids: Vec<String>,
+    pub output_budget_tokens: Option<u32>,
+    pub compaction_attempt: Option<GeneratedCompactionAttempt>,
     pub request: TraceRequest,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratedNodeKind {
+    ModelTurn,
+    SessionClose,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionExpectedEffect {
+    NoMutationAborted,
+    ApplyOnce,
+    DuplicateNoop,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeneratedCompactionAttempt {
+    pub operation_id: String,
+    pub phase: String,
+    pub attempt: usize,
+    pub expected_effect: CompactionExpectedEffect,
+    pub abort_after_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeneratedCompactionOperation {
+    pub operation_id: String,
+    pub session_id: String,
+    pub phase: String,
+    pub attempts: Vec<usize>,
+    pub applied_attempt: usize,
+    pub expected_apply_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,9 +102,11 @@ struct Planner {
     shared_prefix: Vec<u64>,
     sessions: Vec<GeneratedSession>,
     nodes: Vec<GeneratedNode>,
+    compaction_operations: Vec<GeneratedCompactionOperation>,
     labels: BTreeMap<String, u64>,
     label_owners: BTreeMap<u64, String>,
     total_input_tokens: u64,
+    pending_session_closes: usize,
 }
 
 struct SessionState {
@@ -93,8 +133,11 @@ struct NodeSpec<'a> {
     root_arrival_ms: Option<u64>,
     action: &'a str,
     input_trigger: &'a str,
-    output_tokens: u64,
+    kind: GeneratedNodeKind,
+    logical_output_tokens: u64,
+    output_budget_tokens: Option<u64>,
     compaction: Option<serde_json::Value>,
+    compaction_attempt: Option<GeneratedCompactionAttempt>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,9 +173,11 @@ impl Planner {
             shared_prefix: Vec::new(),
             sessions: Vec::new(),
             nodes: Vec::new(),
+            compaction_operations: Vec::new(),
             labels: BTreeMap::new(),
             label_owners: BTreeMap::new(),
             total_input_tokens: 0,
+            pending_session_closes: 0,
         };
         let system_tokens = planner
             .config
@@ -186,6 +231,7 @@ impl Planner {
             &profile_digest_sha256,
             &self.sessions,
             &self.nodes,
+            &self.compaction_operations,
             &trace_manifest,
         ))?;
         let scenario_digest_sha256 = hex::encode(Sha256::digest(scenario_bytes));
@@ -196,6 +242,7 @@ impl Planner {
             config: self.config,
             sessions: self.sessions,
             nodes: self.nodes,
+            compaction_operations: self.compaction_operations,
             trace_manifest,
         })
     }
@@ -211,7 +258,12 @@ impl Planner {
             root_agent_slot,
         } = launch;
         if self.sessions.len() >= self.config.max_sessions
-            || self.nodes.len() >= self.config.max_nodes
+            || self
+                .nodes
+                .len()
+                .saturating_add(self.pending_session_closes)
+                .saturating_add(2)
+                > self.config.max_nodes
         {
             return Ok(None);
         }
@@ -226,6 +278,7 @@ impl Planner {
             depth,
             root_agent_slot,
         });
+        self.pending_session_closes += 1;
         let repository_tokens = self.config.repository_tokens.sample(&mut self.rng)?;
         let session_tokens = self.config.session_tokens.sample(&mut self.rng)?;
         let mut blocks = self.shared_prefix.clone();
@@ -260,7 +313,8 @@ impl Planner {
         let mut final_node = None;
 
         for turn in 0..turns {
-            if self.nodes.len() >= self.config.max_nodes {
+            if self.nodes.len().saturating_add(self.pending_session_closes) >= self.config.max_nodes
+            {
                 break;
             }
             if self.compaction_due(&state) {
@@ -272,29 +326,24 @@ impl Planner {
                     summary_prompt_tokens,
                 )?;
                 state.blocks.extend(summary_prompt);
-                let compaction_output = self.config.summary_output_tokens.sample(&mut self.rng)?;
-                let compaction = serde_json::json!({
-                    "phase": "pre_turn",
-                    "window_epoch": state.window_epoch,
-                    "pre_tokens": state.blocks.len() * self.config.block_size,
-                });
-                let node = self.push_request(
+                let summary_tokens = self.config.summary_output_tokens.sample(&mut self.rng)?;
+                let operation = self.push_compaction_operation(
                     &state,
-                    NodeSpec {
-                        dependencies,
-                        delay_after_dependencies_ms: delay_ms,
-                        root_arrival_ms: root_arrival_ms.filter(|_| final_node.is_none()),
-                        action: "compaction",
-                        input_trigger: "other",
-                        output_tokens: compaction_output,
-                        compaction: Some(compaction),
-                    },
+                    turn,
+                    dependencies,
+                    delay_ms,
+                    root_arrival_ms.filter(|_| final_node.is_none()),
+                    summary_tokens,
                 )?;
-                final_node = Some(node);
-                dependencies = vec![node];
+                final_node = operation.last().copied();
+                dependencies = operation
+                    .last()
+                    .copied()
+                    .map(|node| vec![node])
+                    .unwrap_or_default();
                 delay_ms = 0;
                 state.blocks.truncate(original_blocks);
-                self.compact_state(&mut state, turn, compaction_output)?;
+                self.compact_state(&mut state, turn, summary_tokens)?;
                 next_trigger = "other";
             }
 
@@ -312,8 +361,11 @@ impl Planner {
                     root_arrival_ms: root_arrival_ms.filter(|_| final_node.is_none()),
                     action: action.name(),
                     input_trigger: next_trigger,
-                    output_tokens,
+                    kind: GeneratedNodeKind::ModelTurn,
+                    logical_output_tokens: output_tokens,
+                    output_budget_tokens: Some(output_tokens),
                     compaction: None,
+                    compaction_attempt: None,
                 },
             )?;
             final_node = Some(node);
@@ -336,8 +388,11 @@ impl Planner {
                         root_arrival_ms: None,
                         action: "background",
                         input_trigger: "other",
-                        output_tokens: background_output,
+                        kind: GeneratedNodeKind::ModelTurn,
+                        logical_output_tokens: background_output,
+                        output_budget_tokens: Some(background_output),
                         compaction: None,
+                        compaction_attempt: None,
                     },
                 )?;
             }
@@ -444,7 +499,24 @@ impl Planner {
                 }
             }
         }
-        Ok(final_node)
+        let final_model_node = final_node.context("generated session has no model turn")?;
+        let close = self.push_request(
+            &state,
+            NodeSpec {
+                dependencies: vec![final_model_node],
+                delay_after_dependencies_ms: 0,
+                root_arrival_ms: None,
+                action: "session_close",
+                input_trigger: "other",
+                kind: GeneratedNodeKind::SessionClose,
+                logical_output_tokens: 0,
+                output_budget_tokens: None,
+                compaction: None,
+                compaction_attempt: None,
+            },
+        )?;
+        self.pending_session_closes = self.pending_session_closes.saturating_sub(1);
+        Ok(Some(close))
     }
 
     fn sample_action(&mut self, depth: usize, allow_completion: bool) -> NextAction {
@@ -506,6 +578,112 @@ impl Planner {
                     * self.config.compaction_trigger_fraction) as usize
     }
 
+    fn push_compaction_operation(
+        &mut self,
+        state: &SessionState,
+        turn: usize,
+        mut dependencies: Vec<usize>,
+        delay_after_dependencies_ms: u64,
+        root_arrival_ms: Option<u64>,
+        summary_tokens: u64,
+    ) -> Result<Vec<usize>> {
+        let phase = "pre_turn";
+        let operation_id = format!(
+            "compaction-{:016x}-{}-{}-{turn}",
+            self.config.seed, state.session_id, state.window_epoch
+        );
+        let available_attempts = self
+            .config
+            .max_nodes
+            .saturating_sub(self.nodes.len().saturating_add(self.pending_session_closes));
+        let max_attempts = self.config.compaction_max_attempts.min(available_attempts);
+        if max_attempts == 0 {
+            bail!("generated scenario has no room for a compaction attempt");
+        }
+
+        let mut effects = Vec::new();
+        if max_attempts >= 2 && self.rng.random::<f64>() < self.config.compaction_abort_probability
+        {
+            effects.push(CompactionExpectedEffect::NoMutationAborted);
+        }
+        effects.push(CompactionExpectedEffect::ApplyOnce);
+        if effects.len() < max_attempts
+            && self.rng.random::<f64>() < self.config.compaction_retry_probability
+        {
+            effects.push(CompactionExpectedEffect::DuplicateNoop);
+        }
+
+        let mut nodes = Vec::with_capacity(effects.len());
+        let mut applied_attempt = 0;
+        for (index, expected_effect) in effects.into_iter().enumerate() {
+            let attempt = index + 1;
+            let abort_after_ms = if expected_effect == CompactionExpectedEffect::NoMutationAborted {
+                Some(
+                    self.config
+                        .compaction_abort_after_ms
+                        .sample(&mut self.rng)?,
+                )
+            } else {
+                None
+            };
+            if expected_effect == CompactionExpectedEffect::ApplyOnce {
+                applied_attempt = attempt;
+            }
+            let attempt_metadata = GeneratedCompactionAttempt {
+                operation_id: operation_id.clone(),
+                phase: phase.to_string(),
+                attempt,
+                expected_effect,
+                abort_after_ms,
+            };
+            let compaction = serde_json::json!({
+                "operation_id": operation_id.clone(),
+                "phase": phase,
+                "attempt": attempt,
+                "expected_effect": expected_effect,
+                "window_epoch": state.window_epoch,
+                "pre_tokens": state.blocks.len() * self.config.block_size,
+                "output_budget_tokens": null,
+            });
+            let node = self.push_request(
+                state,
+                NodeSpec {
+                    dependencies,
+                    delay_after_dependencies_ms: if index == 0 {
+                        delay_after_dependencies_ms
+                    } else {
+                        0
+                    },
+                    root_arrival_ms: if index == 0 { root_arrival_ms } else { None },
+                    action: "compaction_attempt",
+                    input_trigger: "other",
+                    kind: GeneratedNodeKind::ModelTurn,
+                    logical_output_tokens: if expected_effect == CompactionExpectedEffect::ApplyOnce
+                    {
+                        summary_tokens
+                    } else {
+                        0
+                    },
+                    output_budget_tokens: None,
+                    compaction: Some(compaction),
+                    compaction_attempt: Some(attempt_metadata),
+                },
+            )?;
+            dependencies = vec![node];
+            nodes.push(node);
+        }
+        self.compaction_operations
+            .push(GeneratedCompactionOperation {
+                operation_id,
+                session_id: state.session_id.clone(),
+                phase: phase.to_string(),
+                attempts: nodes.clone(),
+                applied_attempt,
+                expected_apply_count: 1,
+            });
+        Ok(nodes)
+    }
+
     fn compact_state(
         &mut self,
         state: &mut SessionState,
@@ -529,7 +707,13 @@ impl Planner {
     }
 
     fn push_request(&mut self, state: &SessionState, spec: NodeSpec<'_>) -> Result<usize> {
-        if self.nodes.len() >= self.config.max_nodes {
+        let nodes_with_reserved_closes =
+            self.nodes.len().saturating_add(self.pending_session_closes);
+        let no_room = match spec.kind {
+            GeneratedNodeKind::ModelTurn => nodes_with_reserved_closes >= self.config.max_nodes,
+            GeneratedNodeKind::SessionClose => self.nodes.len() >= self.config.max_nodes,
+        };
+        if no_room {
             bail!("generated scenario reached max_nodes");
         }
         if spec.dependencies.is_empty() != spec.root_arrival_ms.is_some() {
@@ -542,11 +726,17 @@ impl Planner {
         {
             bail!("generated request has a forward or missing dependency");
         }
-        let input_tokens = state
-            .blocks
-            .len()
-            .checked_mul(self.config.block_size)
-            .context("generated input length overflow")?;
+        let (input_tokens, input_sequence_hashes) = match spec.kind {
+            GeneratedNodeKind::ModelTurn => (
+                state
+                    .blocks
+                    .len()
+                    .checked_mul(self.config.block_size)
+                    .context("generated input length overflow")?,
+                state.blocks.clone(),
+            ),
+            GeneratedNodeKind::SessionClose => (0, Vec::new()),
+        };
         self.total_input_tokens = self
             .total_input_tokens
             .checked_add(input_tokens as u64)
@@ -557,10 +747,25 @@ impl Planner {
                 self.config.max_total_input_tokens
             );
         }
-        let output_tokens = u32::try_from(spec.output_tokens)
+        let output_tokens = u32::try_from(spec.logical_output_tokens)
             .context("generated output token count does not fit u32")?;
-        if output_tokens == 0 {
-            bail!("generated output token count must be greater than zero");
+        let output_budget_tokens = spec
+            .output_budget_tokens
+            .map(u32::try_from)
+            .transpose()
+            .context("generated output budget does not fit u32")?;
+        match spec.kind {
+            GeneratedNodeKind::ModelTurn
+                if output_tokens == 0 && spec.compaction_attempt.is_none() =>
+            {
+                bail!("generated model turn output must be greater than zero");
+            }
+            GeneratedNodeKind::SessionClose
+                if output_tokens != 0 || output_budget_tokens.is_some() =>
+            {
+                bail!("generated session close must have no model output budget");
+            }
+            _ => {}
         }
         let ordinal = self.nodes.len();
         let node_id = format!("node-{ordinal}");
@@ -573,17 +778,18 @@ impl Planner {
             output_tokens,
             request_received_ms: spec.root_arrival_ms.unwrap_or(0),
             trace_block_size: self.config.block_size,
-            input_sequence_hashes: state.blocks.clone(),
+            input_sequence_hashes,
             agent_context: Some(AgentContext {
                 session_id: state.session_id.clone(),
                 parent_session_id: state.parent_session_id.clone(),
-                session_final: (spec.action == "complete").then_some(true),
+                session_final: Some(spec.kind == GeneratedNodeKind::SessionClose),
                 compaction: spec.compaction,
                 input_trigger: Some(spec.input_trigger.to_string()),
             }),
         };
         self.nodes.push(GeneratedNode {
             node_id,
+            kind: spec.kind,
             action: spec.action.to_string(),
             dependencies: spec.dependencies,
             delay_after_dependencies_ms: spec.delay_after_dependencies_ms,
@@ -591,6 +797,8 @@ impl Planner {
             window_epoch: state.window_epoch,
             tool_events: Vec::new(),
             spawned_session_ids: Vec::new(),
+            output_budget_tokens,
+            compaction_attempt: spec.compaction_attempt,
             request,
         });
         Ok(ordinal)
@@ -650,6 +858,11 @@ impl Planner {
                 .checked_add(node.request.output_tokens as u64)
                 .context("generated output token total overflow")
         })?;
+        let zero_output_requests = self
+            .nodes
+            .iter()
+            .filter(|node| node.request.output_tokens == 0)
+            .count();
         let last_root_arrival = self
             .nodes
             .iter()
@@ -658,7 +871,7 @@ impl Planner {
             .unwrap_or(0);
         Ok(TraceManifest {
             request_count: self.nodes.len(),
-            zero_output_requests: 0,
+            zero_output_requests,
             session_count: self.sessions.len(),
             requests_with_agent_context: self.nodes.len(),
             first_request_received_ms: 0,
@@ -751,9 +964,10 @@ mod tests {
         let compactions = scenario
             .nodes
             .iter()
-            .filter(|node| node.action == "compaction")
+            .filter(|node| node.action == "compaction_attempt")
             .collect::<Vec<_>>();
         assert!(!compactions.is_empty());
+        assert_eq!(scenario.compaction_operations.len(), compactions.len());
         assert!(compactions.iter().all(|node| {
             node.request
                 .agent_context
@@ -762,6 +976,48 @@ mod tests {
                 .is_some()
         }));
         assert!(scenario.nodes.iter().any(|node| node.window_epoch > 0));
+    }
+
+    #[test]
+    fn compaction_attempts_share_identity_and_apply_once() {
+        let mut config = config(AgentKind::Codex);
+        config.root_sessions = 1;
+        config.concurrent_agents = 1;
+        config.context_window_tokens = 160;
+        config.compaction_trigger_fraction = 0.75;
+        config.compaction_abort_probability = 1.0;
+        config.compaction_retry_probability = 1.0;
+        config.compaction_max_attempts = 3;
+
+        let scenario = GeneratedScenario::generate(config).unwrap();
+        let operation = scenario.compaction_operations.first().unwrap();
+        assert_eq!(operation.attempts.len(), 3);
+        assert_eq!(operation.applied_attempt, 2);
+        assert_eq!(operation.expected_apply_count, 1);
+
+        let attempts = operation
+            .attempts
+            .iter()
+            .map(|ordinal| &scenario.nodes[*ordinal])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|node| node.compaction_attempt.as_ref().unwrap().expected_effect)
+                .collect::<Vec<_>>(),
+            vec![
+                CompactionExpectedEffect::NoMutationAborted,
+                CompactionExpectedEffect::ApplyOnce,
+                CompactionExpectedEffect::DuplicateNoop,
+            ]
+        );
+        assert!(attempts.iter().enumerate().all(|(index, node)| {
+            let attempt = node.compaction_attempt.as_ref().unwrap();
+            attempt.operation_id == operation.operation_id
+                && attempt.phase == operation.phase
+                && attempt.attempt == index + 1
+                && node.output_budget_tokens.is_none()
+        }));
     }
 
     #[test]
@@ -823,19 +1079,24 @@ mod tests {
         config.restart_delay_ms = UIntDistribution::fixed(17);
 
         let scenario = GeneratedScenario::generate(config).unwrap();
-        assert_eq!(scenario.nodes.len(), 3);
+        assert_eq!(scenario.nodes.len(), 6);
         assert_eq!(scenario.nodes[0].root_arrival_ms, Some(0));
         assert!(scenario.nodes[0].dependencies.is_empty());
         assert_eq!(scenario.nodes[1].root_arrival_ms, None);
         assert_eq!(scenario.nodes[1].dependencies, vec![0]);
-        assert_eq!(scenario.nodes[1].delay_after_dependencies_ms, 17);
         assert_eq!(scenario.nodes[2].dependencies, vec![1]);
-        assert!(scenario.nodes.iter().all(|node| {
+        assert_eq!(scenario.nodes[2].delay_after_dependencies_ms, 17);
+        assert_eq!(scenario.nodes[3].dependencies, vec![2]);
+        assert_eq!(scenario.nodes[4].dependencies, vec![3]);
+        assert_eq!(scenario.nodes[4].delay_after_dependencies_ms, 17);
+        assert_eq!(scenario.nodes[5].dependencies, vec![4]);
+        assert!(scenario.nodes.iter().enumerate().all(|(ordinal, node)| {
+            let expected = ordinal % 2 == 1;
             node.request
                 .agent_context
                 .as_ref()
                 .and_then(|context| context.session_final)
-                == Some(true)
+                == Some(expected)
         }));
         assert!(
             scenario

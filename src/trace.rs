@@ -75,6 +75,17 @@ pub struct TraceRequest {
     pub agent_context: Option<AgentContext>,
 }
 
+impl TraceRequest {
+    pub fn is_session_close(&self) -> bool {
+        self.output_tokens == 0
+            && self
+                .agent_context
+                .as_ref()
+                .and_then(|context| context.session_final)
+                == Some(true)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TraceManifest {
     pub request_count: usize,
@@ -608,6 +619,18 @@ fn compile_request(record: TraceRecord, ordinal: usize) -> Result<TraceRequest> 
         .output_tokens
         .context("request has no output_tokens")?;
     let output_tokens = u32::try_from(output_tokens).context("output_tokens does not fit u32")?;
+    if output_tokens == 0
+        && record
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.session_final)
+            != Some(true)
+    {
+        bail!(
+            "request {} has zero output but is not a session-final control request",
+            request.request_id
+        );
+    }
     let request_received_ms = request
         .request_received_ms
         .context("request has no request_received_ms")?;
@@ -798,6 +821,37 @@ mod tests {
         }))
         .unwrap();
         assert!(compile_request(record, 0).is_err());
+    }
+
+    #[test]
+    fn accepts_zero_output_only_for_session_close() {
+        let close = serde_json::json!({
+            "schema": TRACE_SCHEMA_V1,
+            "event_type": "request_end",
+            "agent_context": {"session_id": "thread-1", "session_final": true},
+            "request": {
+                "request_id": "close",
+                "output_tokens": 0,
+                "request_received_ms": 1000,
+                "replay": {
+                    "trace_block_size": 16,
+                    "input_length": 3,
+                    "input_sequence_hashes": [11]
+                }
+            }
+        });
+        let request = compile_request(serde_json::from_value(close.clone()).unwrap(), 0).unwrap();
+        assert!(request.is_session_close());
+
+        let mut model_turn = close;
+        model_turn["agent_context"]["session_final"] = serde_json::json!(false);
+        model_turn["request"]["request_id"] = serde_json::json!("bad-zero");
+        assert!(
+            compile_request(serde_json::from_value(model_turn).unwrap(), 0)
+                .unwrap_err()
+                .to_string()
+                .contains("not a session-final control request")
+        );
     }
 
     #[test]
