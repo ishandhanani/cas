@@ -10,14 +10,14 @@
 use std::time::Instant;
 
 /// Name of the active timer implementation for run artifacts.
-pub const TIMER_BACKEND: &str = if cfg!(target_os = "linux") {
+pub(crate) const TIMER_BACKEND: &str = if cfg!(target_os = "linux") {
     "linux-timerfd"
 } else {
     "tokio-time"
 };
 
 /// Wait until `deadline` without returning before it.
-pub async fn sleep_until(deadline: Instant) {
+pub(crate) async fn sleep_until(deadline: Instant) {
     loop {
         let now = Instant::now();
         let Some(remaining) = deadline.checked_duration_since(now) else {

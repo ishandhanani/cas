@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentKind;
 
-pub const GENERATOR_SCHEMA_VERSION: u32 = 2;
+pub const GENERATOR_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,7 +81,6 @@ pub struct BehaviorOverrides {
     pub subagent_probability: Option<f64>,
     pub swarm_probability: Option<f64>,
     pub completion_probability: Option<f64>,
-    pub background_request_probability: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -251,7 +250,6 @@ pub struct ResolvedGeneratorConfig {
     pub subagent_probability: f64,
     pub swarm_probability: f64,
     pub completion_probability: f64,
-    pub background_request_probability: f64,
     pub compaction_enabled: bool,
     pub compaction_trigger_fraction: f64,
     pub summary_input_tokens: UIntDistribution,
@@ -343,10 +341,6 @@ impl GeneratorConfig {
             &mut resolved.completion_probability,
             self.behavior.completion_probability,
         );
-        replace(
-            &mut resolved.background_request_probability,
-            self.behavior.background_request_probability,
-        );
         replace(&mut resolved.compaction_enabled, self.compaction.enabled);
         replace(
             &mut resolved.compaction_trigger_fraction,
@@ -413,17 +407,12 @@ fn replace<T>(target: &mut T, value: Option<T>) {
 
 impl ResolvedGeneratorConfig {
     pub(super) fn preset(agent: AgentKind, seed: u64) -> Self {
-        let (
-            system_prefix_tokens,
-            tool_catalog_tokens,
-            tool_probability,
-            subagent_probability,
-            background_request_probability,
-        ) = match agent {
-            AgentKind::ClaudeCode => (12_000, 14_000, 0.54, 0.10, 0.08),
-            AgentKind::Codex => (11_000, 9_000, 0.50, 0.08, 0.03),
-            AgentKind::Opencode => (7_000, 11_000, 0.48, 0.10, 0.12),
-        };
+        let (system_prefix_tokens, tool_catalog_tokens, tool_probability, subagent_probability) =
+            match agent {
+                AgentKind::ClaudeCode => (12_000, 14_000, 0.54, 0.10),
+                AgentKind::Codex => (11_000, 9_000, 0.50, 0.08),
+                AgentKind::Opencode => (7_000, 11_000, 0.48, 0.10),
+            };
         Self {
             agent,
             seed,
@@ -448,7 +437,6 @@ impl ResolvedGeneratorConfig {
             subagent_probability,
             swarm_probability: 0.025,
             completion_probability: 0.10,
-            background_request_probability,
             compaction_enabled: true,
             compaction_trigger_fraction: 0.78,
             summary_input_tokens: UIntDistribution::uniform(256, 1024),
@@ -540,10 +528,6 @@ impl ResolvedGeneratorConfig {
             ("subagent_probability", self.subagent_probability),
             ("swarm_probability", self.swarm_probability),
             ("completion_probability", self.completion_probability),
-            (
-                "background_request_probability",
-                self.background_request_probability,
-            ),
             ("blocking_probability", self.blocking_probability),
             ("retry_probability", self.retry_probability),
             (
@@ -651,7 +635,7 @@ mod tests {
     fn rejects_trajectories_that_can_have_zero_turns() {
         let config: GeneratorConfig = toml::from_str(
             r#"
-                schema_version = 2
+                schema_version = 3
                 agent = "codex"
 
                 [trajectory]
@@ -660,5 +644,19 @@ mod tests {
         )
         .unwrap();
         assert!(config.resolve().is_err());
+    }
+
+    #[test]
+    fn rejects_removed_same_session_background_requests() {
+        let config = toml::from_str::<GeneratorConfig>(
+            r#"
+                schema_version = 3
+                agent = "codex"
+
+                [behavior]
+                background_request_probability = 0.1
+            "#,
+        );
+        assert!(config.is_err());
     }
 }

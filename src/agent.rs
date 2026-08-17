@@ -14,7 +14,7 @@ pub enum AgentKind {
     Opencode,
 }
 
-pub fn agent_headers(
+pub(crate) fn agent_headers(
     kind: AgentKind,
     context: Option<&AgentContext>,
 ) -> Vec<(&'static str, String)> {
@@ -62,6 +62,24 @@ pub fn agent_headers(
         ));
     }
     headers
+}
+
+pub(crate) fn is_managed_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "x-request-id"
+            | "x-dynamo-session-id"
+            | "x-dynamo-parent-session-id"
+            | "x-dynamo-session-final"
+            | "x-claude-code-session-id"
+            | "x-claude-code-agent-id"
+            | "x-claude-code-parent-agent-id"
+            | "thread-id"
+            | "x-codex-parent-thread-id"
+            | "x-codex-turn-metadata"
+            | "x-session-id"
+            | "x-parent-session-id"
+    )
 }
 
 #[cfg(test)]
@@ -128,5 +146,12 @@ mod tests {
                 ("x-parent-session-id", "parent".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn managed_header_names_are_case_insensitive() {
+        assert!(is_managed_header("X-Request-ID"));
+        assert!(is_managed_header("thread-id"));
+        assert!(!is_managed_header("authorization"));
     }
 }

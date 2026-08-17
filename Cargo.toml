@@ -6,6 +6,7 @@ rust-version = "1.85"
 license = "Apache-2.0"
 description = "KV-faithful trace replay and generated coding-agent load for Dynamo"
 readme = "README.md"
+repository = "https://github.com/ishandhanani/cas"
 publish = false
 
 [dependencies]

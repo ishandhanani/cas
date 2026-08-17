@@ -2,6 +2,8 @@
 
 Generator profiles are strict, versioned TOML. Unknown fields and unsupported schema versions fail during planning. `scenario.json` contains the fully resolved configuration, so a run does not depend on hidden defaults after planning.
 
+Schema version 3 removes `behavior.background_request_probability`. Independent work must use subagents so it has its own session lineage and cannot race the parent session close.
+
 ## Execution model
 
 ```text
@@ -12,29 +14,22 @@ active-agent slot -> root task -> model request
                                   +--parallel tools-max latency-----> next request
                                   +--subagent------child completion-> parent join
                                   +--swarm---------all children-----> parent join
-                                  +--background----independent request
                                   +--complete model turn--> session close --> next root task in slot
 ```
 
-Generated traffic is closed-loop. The first task in each active-agent slot starts during the configured ramp-up. Every later request becomes ready only after all graph dependencies complete, plus its sampled virtual delay. The final model turn has a positive output budget and `session_final = false`. Its dependent `SessionClose` node has zero logical output, no model token payload, no output budget, and `session_final = true`. When a root task closes, that slot releases its next root task after `restart_delay_ms`. Target response latency therefore controls the generated request rate. The scheduler can still run independent slots, tools, background requests, and sibling subagents concurrently. A blocking child or swarm joins the parent; a non-blocking child continues independently.
+Generated traffic is closed-loop. The first task in each active-agent slot starts during the configured ramp-up. Every later request becomes ready only after all graph dependencies complete, plus its sampled virtual delay. The final model turn has a positive output budget and `session_final = false`. Its dependent `SessionClose` node has zero logical output, no model token payload, no output budget, and `session_final = true`. When a root task closes, that slot releases its next root task after `restart_delay_ms`. Target response latency therefore controls the generated request rate. The scheduler can still run independent slots and sibling subagents concurrently. A blocking child or swarm joins the parent; a non-blocking child continues in its own child session.
 
 The generator does not execute tools or generate meaningful text. Tool classes sample delay, result-token geometry, failure, and retry behavior. Those sampled outcomes and direct child-session IDs are recorded on their originating node in `scenario.json`.
 
 ## Minimal profile
 
 ```toml
-schema_version = 2
+schema_version = 3
 agent = "codex"
 seed = 42
-
-[load]
-root_sessions = 16
-concurrent_agents = 8
-startup_interval_ms = 0
-restart_delay_ms = { kind = "fixed", value = 0 }
 ```
 
-`agent` selects the `claude-code`, `codex`, or `opencode` structural preset. Every remaining field is an optional override. See `profiles/codex-balanced.toml` for a profile that spells out the complete surface.
+`agent` selects the `claude-code`, `codex`, or `opencode` structural preset. Every remaining field is an optional override. Checked-in profiles contain only intentional deviations from those presets; the sections below define the complete surface.
 
 ## Distributions
 
@@ -55,7 +50,7 @@ All sampling uses the profile seed. Log-normal samples are rounded and clamped t
 - `load.startup_interval_ms`: spacing between the first task in each slot; zero starts the full population together.
 - `load.restart_delay_ms`: sampled idle delay between a completed root task and its slot's next task.
 
-For example, `root_sessions = 100` and `concurrent_agents = 10` runs ten active root agents, each processing ten tasks. With a zero restart delay, every slot replaces a completed task immediately. Subagents and background work can temporarily push live request concurrency above ten.
+For example, `root_sessions = 100` and `concurrent_agents = 10` runs ten active root agents, each processing ten tasks. With a zero restart delay, every slot replaces a completed task immediately. Subagents can temporarily push live request concurrency above ten.
 
 ## Trajectory and token shape
 
@@ -80,7 +75,6 @@ The configured token sizes are rounded up to complete KV blocks. This keeps pref
 - `behavior.subagent_probability`: one child session.
 - `behavior.swarm_probability`: sampled child fanout.
 - `behavior.completion_probability`: early completion after the minimum trajectory prefix.
-- `behavior.background_request_probability`: an independent request released from the current turn.
 
 The first five probabilities must sum to at most 1.0. Remaining probability becomes a text/user turn. The last configured turn is always a completion so every non-truncated session terminates.
 

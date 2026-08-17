@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
                     max_in_flight,
                     warmup_connections,
                     http_transport,
-                    prepare_lookahead: Duration::from_millis(prepare_lookahead_ms),
+                    prepare_lookahead: Some(Duration::from_millis(prepare_lookahead_ms)),
                     result_flush_interval,
                     max_dispatch_p99_ms,
                     max_dispatch_max_ms,
@@ -111,12 +111,33 @@ async fn main() -> Result<()> {
                 bail!("shape-strict replay failed request or dispatch-timing fidelity checks");
             }
         }
+        Command::Plan { config, output } => {
+            let scenario = GeneratedScenario::generate(GeneratorConfig::load(&config)?.resolve()?)?;
+            std::fs::create_dir_all(&output).with_context(|| {
+                format!("failed to create output directory {}", output.display())
+            })?;
+            let scenario_path = output.join("scenario.json");
+            let writer = std::io::BufWriter::new(
+                std::fs::File::create(&scenario_path)
+                    .with_context(|| format!("failed to create {}", scenario_path.display()))?,
+            );
+            serde_json::to_writer_pretty(writer, &scenario)
+                .with_context(|| format!("failed to write {}", scenario_path.display()))?;
+            let output = serde_json::json!({
+                "scenario_digest_sha256": scenario.scenario_digest_sha256,
+                "profile_digest_sha256": scenario.profile_digest_sha256,
+                "requests": scenario.nodes.len(),
+                "sessions": scenario.sessions.len(),
+                "trace_manifest": scenario.trace_manifest,
+                "scenario_path": scenario_path,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
         Command::Generate {
             config,
             model,
             target,
             output,
-            plan_only,
             tokens,
             fidelity,
             max_in_flight,
@@ -131,30 +152,6 @@ async fn main() -> Result<()> {
             headers,
         } => {
             let scenario = GeneratedScenario::generate(GeneratorConfig::load(&config)?.resolve()?)?;
-            std::fs::create_dir_all(&output).with_context(|| {
-                format!("failed to create output directory {}", output.display())
-            })?;
-            let scenario_path = output.join("scenario.json");
-            if plan_only {
-                let writer = std::io::BufWriter::new(
-                    std::fs::File::create(&scenario_path)
-                        .with_context(|| format!("failed to create {}", scenario_path.display()))?,
-                );
-                serde_json::to_writer_pretty(writer, &scenario)
-                    .with_context(|| format!("failed to write {}", scenario_path.display()))?;
-                let output = serde_json::json!({
-                    "scenario_digest_sha256": scenario.scenario_digest_sha256,
-                    "profile_digest_sha256": scenario.profile_digest_sha256,
-                    "requests": scenario.nodes.len(),
-                    "sessions": scenario.sessions.len(),
-                    "trace_manifest": scenario.trace_manifest,
-                    "scenario_path": scenario_path,
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-                return Ok(());
-            }
-            let model = model.context("--model is required unless --plan-only is set")?;
-            let target = target.context("--target is required unless --plan-only is set")?;
             let dictionary = TokenDictionary::new(
                 scenario.trace_manifest.trace_block_size,
                 scenario.trace_manifest.distinct_sequence_hashes,
@@ -171,7 +168,7 @@ async fn main() -> Result<()> {
                     max_in_flight,
                     warmup_connections,
                     http_transport,
-                    prepare_lookahead: Duration::from_millis(1),
+                    prepare_lookahead: None,
                     result_flush_interval,
                     max_dispatch_p99_ms,
                     max_dispatch_max_ms,
@@ -246,16 +243,37 @@ fn parse_key_values(
     values: Vec<String>,
     label: &str,
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    values
-        .into_iter()
-        .map(|value| {
-            let (name, setting) = value
-                .split_once('=')
-                .with_context(|| format!("{label} {value:?} must use NAME=VALUE"))?;
-            if name.is_empty() || setting.is_empty() {
-                bail!("{label} names and values must not be empty");
-            }
-            Ok((name.to_string(), setting.to_string()))
-        })
-        .collect()
+    let mut parsed = std::collections::BTreeMap::new();
+    for value in values {
+        let (name, setting) = value
+            .split_once('=')
+            .with_context(|| format!("{label} {value:?} must use NAME=VALUE"))?;
+        if name.is_empty() || setting.is_empty() {
+            bail!("{label} names and values must not be empty");
+        }
+        if parsed
+            .insert(name.to_string(), setting.to_string())
+            .is_some()
+        {
+            bail!("{label} {name:?} is declared more than once");
+        }
+    }
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_mode_rejects_duplicate_keys() {
+        let result = parse_key_values(
+            vec![
+                "ownership=session".to_string(),
+                "ownership=shared".to_string(),
+            ],
+            "engine cache mode",
+        );
+        assert!(result.is_err());
+    }
 }

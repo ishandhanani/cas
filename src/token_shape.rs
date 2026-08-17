@@ -64,7 +64,7 @@ impl SafeTokenAlphabet {
         }
     }
 
-    pub fn from_unverified_range(
+    pub(crate) fn from_unverified_range(
         start: u32,
         size: u32,
         extra_excluded_ids: &[u32],
@@ -352,7 +352,8 @@ impl TokenDictionary {
         })
     }
 
-    pub fn build(requests: &[TraceRequest], alphabet: SafeTokenAlphabet) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn build(requests: &[TraceRequest], alphabet: SafeTokenAlphabet) -> Result<Self> {
         let block_size = requests
             .first()
             .context("cannot build a token dictionary for an empty trace")?

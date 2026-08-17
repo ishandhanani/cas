@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod agent;
-pub mod clock;
+mod clock;
 pub mod compare;
 pub mod replay;
 pub mod scenario;
-pub mod scheduler;
+mod scheduler;
 pub mod telemetry;
 pub mod token_shape;
 pub mod trace;

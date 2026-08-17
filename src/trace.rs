@@ -103,8 +103,9 @@ pub struct TraceManifest {
 }
 
 #[derive(Debug, Clone)]
-pub struct LoadedTrace {
+pub(crate) struct LoadedTrace {
     pub requests: Vec<TraceRequest>,
+    #[cfg(test)]
     pub manifest: TraceManifest,
 }
 
@@ -134,7 +135,7 @@ impl std::fmt::Debug for StoredTrace {
 }
 
 impl StoredTrace {
-    pub fn reader(&self) -> StoredTraceReader {
+    pub(crate) fn reader(&self) -> StoredTraceReader {
         StoredTraceReader {
             database_path: self.database_path.clone(),
             next_ordinal: 0,
@@ -144,7 +145,7 @@ impl StoredTrace {
     }
 }
 
-pub struct StoredTraceReader {
+pub(crate) struct StoredTraceReader {
     database_path: PathBuf,
     next_ordinal: usize,
     batch_size: usize,
@@ -152,7 +153,7 @@ pub struct StoredTraceReader {
 }
 
 impl StoredTraceReader {
-    pub fn next_request(&mut self) -> Result<Option<TraceRequest>> {
+    pub(crate) fn next_request(&mut self) -> Result<Option<TraceRequest>> {
         if let Some(request) = self.buffered.pop_front() {
             self.next_ordinal = request.ordinal + 1;
             return Ok(Some(request));
@@ -472,7 +473,7 @@ fn u64_to_i64(value: u64) -> Result<i64> {
     i64::try_from(value).context("trace timestamp does not fit SQLite INTEGER")
 }
 
-pub fn load_trace(
+pub(crate) fn load_trace(
     paths: &[PathBuf],
     max_requests: Option<usize>,
     session_id: Option<&str>,
@@ -509,8 +510,16 @@ pub fn load_trace(
         request.ordinal = ordinal;
     }
 
-    let manifest = make_manifest(&requests, source_digest.finalize().as_slice())?;
-    Ok(LoadedTrace { requests, manifest })
+    let source_digest = source_digest.finalize();
+    #[cfg(test)]
+    let manifest = make_manifest(&requests, source_digest.as_slice())?;
+    #[cfg(not(test))]
+    make_manifest(&requests, source_digest.as_slice())?;
+    Ok(LoadedTrace {
+        requests,
+        #[cfg(test)]
+        manifest,
+    })
 }
 
 fn load_path(path: &Path, requests: &mut Vec<TraceRequest>, digest: &mut Sha256) -> Result<()> {

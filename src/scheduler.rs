@@ -8,10 +8,10 @@ use std::collections::BinaryHeap;
 
 /// One item released by [`ReadyQueue`].
 #[derive(Debug)]
-pub struct ReadyItem<T> {
-    pub ready_at_ns: u64,
-    pub ordinal: usize,
-    pub value: T,
+pub(crate) struct ReadyItem<T> {
+    pub(crate) ready_at_ns: u64,
+    pub(crate) ordinal: usize,
+    pub(crate) value: T,
 }
 
 impl<T> PartialEq for ReadyItem<T> {
@@ -39,18 +39,18 @@ impl<T> PartialOrd for ReadyItem<T> {
 
 /// Min-priority queue by ready time, then source ordinal.
 #[derive(Debug)]
-pub struct ReadyQueue<T> {
+pub(crate) struct ReadyQueue<T> {
     heap: BinaryHeap<ReadyItem<T>>,
 }
 
 impl<T> ReadyQueue<T> {
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             heap: BinaryHeap::with_capacity(capacity),
         }
     }
 
-    pub fn push(&mut self, ready_at_ns: u64, ordinal: usize, value: T) {
+    pub(crate) fn push(&mut self, ready_at_ns: u64, ordinal: usize, value: T) {
         self.heap.push(ReadyItem {
             ready_at_ns,
             ordinal,
@@ -58,11 +58,11 @@ impl<T> ReadyQueue<T> {
         });
     }
 
-    pub fn next_ready_at_ns(&self) -> Option<u64> {
+    pub(crate) fn next_ready_at_ns(&self) -> Option<u64> {
         self.heap.peek().map(|item| item.ready_at_ns)
     }
 
-    pub fn pop_due(&mut self, now_ns: u64, limit: usize) -> Vec<ReadyItem<T>> {
+    pub(crate) fn pop_due(&mut self, now_ns: u64, limit: usize) -> Vec<ReadyItem<T>> {
         let mut ready = Vec::new();
         while ready.len() < limit
             && self
@@ -75,7 +75,7 @@ impl<T> ReadyQueue<T> {
         ready
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.heap.is_empty()
     }
 }

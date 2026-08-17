@@ -3,9 +3,11 @@
 `agent-loadgen` is a standalone Rust load generator for coding-agent traffic through a Dynamo OpenAI-compatible frontend. It has two workload modes:
 
 - Replay the KV shape, output length, agent headers, and absolute arrival schedule from `dynamo.request.trace.v1` request traces.
-- Generate deterministic Claude Code, Codex, or OpenCode trajectories with tools, compaction, background work, subagents, and swarms.
+- Generate deterministic Claude Code, Codex, or OpenCode trajectories with tools, compaction, subagents, and swarms.
 
 Prompt content is intentionally synthetic. The contract is token count, KV-prefix topology, causal structure, and timing.
+
+Start with [How it works](docs/how-it-works.md) for the execution model, invariants, module map, and artifact flow. See [Generator configuration](docs/generator.md) for the profile schema.
 
 ## Data flow
 
@@ -88,10 +90,9 @@ HTTP/2 prior knowledge is the default because one multiplexed connection avoids 
 Plan without sending traffic:
 
 ```bash
-target/release/agent-loadgen generate \
+target/release/agent-loadgen plan \
   --config profiles/codex-balanced.toml \
-  --output artifacts/codex-plan \
-  --plan-only
+  --output artifacts/codex-plan
 ```
 
 Run the same seeded plan:
@@ -147,7 +148,7 @@ Each engine JSONL record needs `request_id` and may include `cache_source_tokens
 - Source timing has millisecond resolution. Tool durations and dependency edges are not present in a plain request-only trace, so faithful trace replay uses recorded absolute arrivals; generated mode is a separate closed-loop workload with an explicit causal graph.
 - Dummy tokens preserve block-level equality topology, not literal production KV hash values or prompt semantics. Extremely short partial blocks have less encoding capacity than a full `u64`; a captured-trace comparison is the end-to-end proof that the selected trace has no synthetic-prefix collision against a specific Dynamo/frontend version.
 - Operating-system scheduling and target backpressure can miss deadlines. The runner measures and fails those runs instead of hiding the error.
-- Generated token segments are block-size quantized. The generator is bounded by `max_nodes`, `max_sessions`, and `max_total_input_tokens`, but it intentionally materializes its bounded plan before execution.
+- Generated token segments are block-size quantized. The generator materializes bounded graph metadata before execution, but prepares token payloads only for the runnable dependency frontier. `max_nodes`, `max_sessions`, and `max_total_input_tokens` still bound the plan.
 - Target request failures fail the run but still release preplanned successors so the load generator can drain the scenario and report all failures. Compaction aborts and duplicate retries and tool failure/retry behavior can be sampled; general model-turn retry policies are not sampled yet.
 
 ## License

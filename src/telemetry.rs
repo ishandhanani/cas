@@ -79,15 +79,25 @@ pub fn join_engine_telemetry(
     let mut matched_requests = 0;
     for_each_jsonl::<RequestResult, _>(requests_path, |request| {
         request_records += 1;
-        let telemetry = [
+        let mut request_ids = Vec::with_capacity(3);
+        for request_id in [
             Some(request.replay_request_id.as_str()),
             request.source_x_request_id.as_deref(),
             Some(request.source_request_id.as_str()),
         ]
         .into_iter()
         .flatten()
-        .find_map(|request_id| telemetry_by_request.remove(request_id))
-        .unwrap_or_default();
+        {
+            if !request_ids.contains(&request_id) {
+                request_ids.push(request_id);
+            }
+        }
+        let mut telemetry = Vec::new();
+        for request_id in request_ids {
+            if let Some(mut records) = telemetry_by_request.remove(request_id) {
+                telemetry.append(&mut records);
+            }
+        }
         if !telemetry.is_empty() {
             matched_requests += 1;
         }
@@ -222,5 +232,33 @@ mod tests {
             joined["telemetry"][0]["cache_ownership_tokens"]["shared"],
             8
         );
+    }
+
+    #[test]
+    fn joins_telemetry_from_replay_and_source_id_spaces() {
+        let directory = tempdir().unwrap();
+        let requests = directory.path().join("requests.jsonl");
+        let telemetry = directory.path().join("engine.jsonl");
+        let output = directory.path().join("joined.jsonl");
+        std::fs::write(
+            &requests,
+            format!("{}\n", serde_json::to_string(&request()).unwrap()),
+        )
+        .unwrap();
+        std::fs::write(
+            &telemetry,
+            concat!(
+                "{\"request_id\":\"replay\",\"queue_time_ms\":1.0}\n",
+                "{\"request_id\":\"source\",\"physical_free_tokens\":3}\n"
+            ),
+        )
+        .unwrap();
+
+        let summary = join_engine_telemetry(&requests, &[telemetry], &output).unwrap();
+        assert_eq!(summary.telemetry_records, 2);
+        assert_eq!(summary.unmatched_telemetry_records, 0);
+        let joined: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(output).unwrap().trim()).unwrap();
+        assert_eq!(joined["telemetry"].as_array().unwrap().len(), 2);
     }
 }

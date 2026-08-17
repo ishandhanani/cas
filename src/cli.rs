@@ -198,27 +198,34 @@ pub enum Command {
         headers: Vec<String>,
     },
 
+    /// Generate a deterministic scenario without sending traffic.
+    Plan {
+        /// Versioned TOML generator config.
+        #[arg(long)]
+        config: PathBuf,
+
+        /// Output directory for scenario.json.
+        #[arg(long)]
+        output: PathBuf,
+    },
+
     /// Generate and run seeded coding-agent trajectories.
     Generate {
         /// Versioned TOML generator config.
         #[arg(long)]
         config: PathBuf,
 
-        /// Model name sent to Dynamo. Required unless --plan-only is set.
+        /// Model name sent to Dynamo.
         #[arg(long)]
-        model: Option<String>,
+        model: String,
 
-        /// Dynamo base URL or full Chat Completions URL. Required unless --plan-only is set.
+        /// Dynamo base URL or full Chat Completions URL.
         #[arg(long)]
-        target: Option<String>,
+        target: String,
 
         /// Output directory for scenario.json, run.json, and requests.jsonl.
         #[arg(long)]
         output: PathBuf,
-
-        /// Write scenario.json without sending network traffic.
-        #[arg(long)]
-        plan_only: bool,
 
         #[command(flatten)]
         tokens: TokenArgs,
