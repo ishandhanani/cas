@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::config::ResolvedGeneratorConfig;
-use crate::trace::{TraceManifest, TraceRequest};
+use agent_loadgen_core::{TraceManifest, TraceRequest};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GeneratedScenario {

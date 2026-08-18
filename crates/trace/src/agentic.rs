@@ -8,7 +8,8 @@ use std::collections::{HashMap, VecDeque};
 use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 
-use super::{LoadedTrace, RequestEntry, ToolEntry, TraceManifest, TraceRequest};
+use super::{LoadedTrace, RequestEntry, ToolEntry};
+use agent_loadgen_core::{TraceManifest, TraceRequest};
 
 #[derive(Debug, Clone)]
 pub struct AgenticTrace {
@@ -481,8 +482,9 @@ fn validate_dependency_dag(requests: &[RequestEntry], dependencies: &[Vec<usize>
 
 #[cfg(test)]
 mod tests {
+    use super::super::{ClaudeToolReplayMetrics, ToolEntry};
     use super::*;
-    use crate::trace::{AgentContext, ClaudeToolReplayMetrics, ToolEntry, TraceRequest};
+    use agent_loadgen_core::{AgentContext, TraceRequest};
 
     fn entry(
         request_id: &str,

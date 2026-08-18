@@ -34,21 +34,11 @@ The generator does not support child roles, per-child profiles, child-to-child m
 
 | Path | Purpose |
 |---|---|
-| `src/trace.rs` | Trace v1 request/tool parsing and validation. |
-| `src/trace/agentic.rs` | Dynamo-derived session, subagent, tool, and timing lowering. |
-| `src/agent.rs` | Agent-specific context headers. |
-| `src/replay.rs` | Shared run and result contracts. |
-| `src/replay/captured.rs` | Completion-driven captured agent replay. |
-| `src/replay/generated.rs` | Closed-loop generated-graph scheduling. |
-| `src/replay/request.rs` | HTTP construction, execution, and SSE parsing. |
-| `src/replay/artifacts.rs` | Result writing, histograms, and run gates. |
-| `src/scenario/config.rs` | Profile schema, presets, and validation. |
-| `src/scenario/distribution.rs` | Deterministic distribution sampling. |
-| `src/scenario/model.rs` | Serialized generated-scenario types. |
-| `src/scenario/plan.rs` | Generated agent graph planning. |
-| `src/scenario/tool_parallelism.rs` | Call- and time-weighted generated tool statistics. |
-| `src/token_shape.rs` | Safe dummy-token synthesis. |
-| `src/compare.rs` | Structural trace comparison. |
+| `crates/core/` | Agent context, trace contracts, percentiles, and stable ready-time queue. No I/O or workload policy. |
+| `crates/trace/` | Trace v1 parsing, validation, Dynamo-derived causal lowering, and structural comparison. |
+| `crates/generate/` | Strict profile schema, deterministic sampling, serialized scenarios, and synthetic graph planning. |
+| `crates/replay/` | Token synthesis, HTTP/SSE transport, causal schedulers, artifacts, and telemetry joins. |
+| `src/` | Thin `agent-loadgen` CLI: flags, command composition, and exit behavior. |
 | `profiles/` | Small example profiles for supported agents. |
 | `docs/` | Architecture and detailed usage guides. |
 
@@ -59,6 +49,7 @@ The generator does not support child roles, per-child profiles, child-to-child m
 - Keep the profile schema strict. Reject unknown fields.
 - Keep prompt semantics and tool execution out of scope.
 - Keep cache-policy decisions out of this repository.
+- Keep `core` free of HTTP, Tokio, tokenizers, trace parsing, and generator policy. Among this workspace's crates, `trace` and `generate` may depend only on `core`; `replay` may consume both but neither may depend on `replay`.
 - Add behavior details to `docs/`. Keep `README.md` as a short entry point.
 - Keep compaction and subagent behavior in their dedicated guides.
 - Update tests and docs when a timing, token-shape, or dependency contract changes.
@@ -69,10 +60,12 @@ Run these commands before a commit:
 
 ```bash
 cargo fmt --all
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo package --allow-dirty
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo package --workspace --list --allow-dirty
 ```
+
+The workspace crates are private and resolve each other by local path, so Cargo cannot prepare them for a crates.io upload. `cargo package --list` validates the files each package would include; the workspace test command is the compilation check.
 
 Plan each checked-in profile after generator changes:
 

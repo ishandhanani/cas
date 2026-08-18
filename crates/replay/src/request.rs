@@ -14,9 +14,8 @@ use super::{
     HttpTransport, PreparedMetadata, PreparedRequest, ReplayContext, ReplayOptions,
     RequestExecution, RequestResult, millis,
 };
-use crate::agent::{agent_headers, is_managed_header};
 use crate::token_shape::TokenDictionary;
-use crate::trace::TraceRequest;
+use agent_loadgen_core::{TraceRequest, agent_headers, is_managed_header};
 
 pub(super) fn normalize_target(target: &str) -> String {
     let target = target.trim_end_matches('/');

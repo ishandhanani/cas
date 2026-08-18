@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub(super) use super::distribution::UIntDistribution;
-use crate::agent::AgentKind;
+use agent_loadgen_core::AgentKind;
 
 pub const GENERATOR_SCHEMA_VERSION: u32 = 3;
 

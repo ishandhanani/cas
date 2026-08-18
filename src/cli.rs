@@ -2,9 +2,9 @@
 
 use std::path::PathBuf;
 
-use agent_loadgen::agent::AgentKind;
-use agent_loadgen::replay::HttpTransport;
-use agent_loadgen::token_shape::{SafeTokenAlphabet, TokenAlphabetSource};
+use agent_loadgen_core::AgentKind;
+use agent_loadgen_replay::HttpTransport;
+use agent_loadgen_replay::token_shape::{SafeTokenAlphabet, TokenAlphabetSource};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 

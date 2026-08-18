@@ -12,18 +12,56 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "agent-loadgen"
 version = "0.1.0"
 dependencies = [
+ "agent-loadgen-core",
+ "agent-loadgen-generate",
+ "agent-loadgen-replay",
+ "agent-loadgen-trace",
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "agent-loadgen-core"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agent-loadgen-generate"
+version = "0.1.0"
+dependencies = [
+ "agent-loadgen-core",
+ "anyhow",
+ "hex",
+ "rand 0.9.5",
+ "rand_distr",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+]
+
+[[package]]
+name = "agent-loadgen-replay"
+version = "0.1.0"
+dependencies = [
+ "agent-loadgen-core",
+ "agent-loadgen-generate",
+ "agent-loadgen-trace",
  "anyhow",
  "axum",
  "clap",
- "flate2",
  "futures-util",
  "hdrhistogram",
  "hex",
  "hf-hub",
  "json-five",
  "libc",
- "rand 0.9.5",
- "rand_distr",
  "reqwest",
  "serde",
  "serde_json",
@@ -33,6 +71,20 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "agent-loadgen-trace"
+version = "0.1.0"
+dependencies = [
+ "agent-loadgen-core",
+ "anyhow",
+ "flate2",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

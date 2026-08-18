@@ -1,0 +1,17 @@
+[package]
+name = "agent-loadgen-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared contracts and scheduling primitives for agent-loadgen"
+repository.workspace = true
+publish = false
+
+[features]
+clap = ["dep:clap"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

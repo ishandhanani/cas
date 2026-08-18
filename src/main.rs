@@ -2,12 +2,12 @@
 
 use std::time::Duration;
 
-use agent_loadgen::compare::{CompareOptions, compare_traces};
-use agent_loadgen::replay::{ReplayOptions, run_agentic_replay, run_generated_scenario};
-use agent_loadgen::scenario::{GeneratedScenario, GeneratorConfig};
-use agent_loadgen::telemetry::join_engine_telemetry;
-use agent_loadgen::token_shape::TokenDictionary;
-use agent_loadgen::trace::load_agentic_trace;
+use agent_loadgen_generate::scenario::{GeneratedScenario, GeneratorConfig};
+use agent_loadgen_replay::telemetry::join_engine_telemetry;
+use agent_loadgen_replay::token_shape::TokenDictionary;
+use agent_loadgen_replay::{ReplayOptions, run_agentic_replay, run_generated_scenario};
+use agent_loadgen_trace::compare::{CompareOptions, compare_traces};
+use agent_loadgen_trace::load_agentic_trace;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 

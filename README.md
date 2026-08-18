@@ -71,6 +71,7 @@ Generated traffic is closed-loop: model latency, tool time, compaction, and bloc
 ## Documentation
 
 - [How it works](docs/how-it-works.md): timing models, dependency scheduling, subagents, request construction, and module boundaries.
+- [Workspace architecture](docs/workspace.md): crate ownership, dependency direction, and where to make a change.
 - [Trace replay](docs/replay.md): trace contract, token synthesis, timing gates, comparison, and telemetry joins.
 - [Generator configuration](docs/generator.md): profiles, distributions, tools, and safety limits.
 - [Built-in generator presets](docs/presets.md): every resolved default, checked-in profile overrides, and why each baseline exists.

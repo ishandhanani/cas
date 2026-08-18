@@ -13,7 +13,7 @@ use super::model::{
     GeneratedNode, GeneratedScenario, GeneratedSession, GeneratedToolEvent,
 };
 use super::tool_parallelism::summarize_tool_parallelism;
-use crate::trace::{AgentContext, TraceManifest, TraceRequest};
+use agent_loadgen_core::{AgentContext, TraceManifest, TraceRequest};
 
 impl GeneratedScenario {
     pub fn generate(config: ResolvedGeneratorConfig) -> Result<Self> {

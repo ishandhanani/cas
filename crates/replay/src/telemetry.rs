@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::replay::RequestResult;
+use crate::RequestResult;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EngineTelemetryRecord {
@@ -164,7 +164,7 @@ fn validate_record(record: &EngineTelemetryRecord, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replay::RequestResult;
+    use crate::RequestResult;
     use tempfile::tempdir;
 
     fn request() -> RequestResult {

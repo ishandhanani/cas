@@ -8,13 +8,15 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
+pub use agent_loadgen_core::{AgentContext, TraceManifest, TraceRequest};
 use anyhow::{Context, Result, bail};
 use flate2::read::MultiGzDecoder;
+use serde::Deserialize;
 use serde::de::IgnoredAny;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod agentic;
+pub mod compare;
 
 pub use agentic::{AgenticToolEvent, AgenticTrace, AgenticTurn};
 
@@ -31,17 +33,6 @@ struct TraceRecord {
     request: Option<RequestMetrics>,
     #[serde(default)]
     tool: Option<ToolMetrics>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct AgentContext {
-    pub session_id: String,
-    #[serde(default)]
-    pub parent_session_id: Option<String>,
-    #[serde(default)]
-    pub compaction: Option<serde_json::Value>,
-    #[serde(default)]
-    pub input_trigger: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,35 +125,6 @@ struct TraceEventFields {
 #[derive(Debug, Deserialize)]
 struct WrappedTraceRecord {
     event: TraceRecord,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TraceRequest {
-    pub ordinal: usize,
-    pub source_request_id: String,
-    pub source_x_request_id: Option<String>,
-    pub source_model: Option<String>,
-    pub input_tokens: usize,
-    pub output_tokens: u32,
-    pub request_received_ms: u64,
-    pub trace_block_size: usize,
-    pub input_sequence_hashes: Vec<u64>,
-    pub agent_context: Option<AgentContext>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TraceManifest {
-    pub request_count: usize,
-    pub session_count: usize,
-    pub requests_with_agent_context: usize,
-    pub first_request_received_ms: u64,
-    pub last_request_received_ms: u64,
-    pub duration_ms: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub distinct_sequence_hashes: usize,
-    pub trace_block_size: usize,
-    pub source_digest_sha256: String,
 }
 
 #[derive(Debug, Clone)]

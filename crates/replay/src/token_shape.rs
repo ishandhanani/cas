@@ -9,7 +9,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokenizers::Tokenizer;
 
-use crate::trace::TraceRequest;
+use agent_loadgen_core::TraceRequest;
 
 const CODEWORD_ALGORITHM: &str = "splitmix64-base-n-lsd-v2";
 const SPECIAL_TOKEN_FIELDS: &[&str] = &[

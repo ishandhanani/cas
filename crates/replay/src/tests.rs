@@ -13,9 +13,10 @@ use tempfile::tempdir;
 
 use super::request::scaled_offset_ns;
 use super::*;
-use crate::scenario::{GeneratedScenario, GeneratorConfig};
 use crate::token_shape::{SafeTokenAlphabet, TokenDictionary};
-use crate::trace::{AgentContext, AgenticTrace, AgenticTurn, TraceRequest};
+use agent_loadgen_core::{AgentContext, TraceRequest};
+use agent_loadgen_generate::scenario::{GeneratedScenario, GeneratorConfig};
+use agent_loadgen_trace::{AgenticTrace, AgenticTurn};
 
 #[test]
 fn target_normalization_accepts_base_or_endpoint() {

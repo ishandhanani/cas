@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::trace::AgentContext;
+use crate::contracts::AgentContext;
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentKind {
     ClaudeCode,
@@ -14,7 +14,7 @@ pub enum AgentKind {
     Opencode,
 }
 
-pub(crate) fn agent_headers(
+pub fn agent_headers(
     kind: AgentKind,
     context: Option<&AgentContext>,
 ) -> Vec<(&'static str, String)> {
@@ -61,7 +61,7 @@ pub(crate) fn agent_headers(
     headers
 }
 
-pub(crate) fn is_managed_header(name: &str) -> bool {
+pub fn is_managed_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "x-request-id"

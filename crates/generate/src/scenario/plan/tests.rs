@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::agent::AgentKind;
 use crate::scenario::config::UIntDistribution;
+use agent_loadgen_core::AgentKind;
 
 fn config(agent: AgentKind) -> ResolvedGeneratorConfig {
     let mut config = ResolvedGeneratorConfig::preset(agent, 42);

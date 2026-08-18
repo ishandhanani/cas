@@ -152,24 +152,27 @@ Frontend-observed arrival is different from client dispatch. Capture a Dynamo re
 
 Cache policy remains outside this project. `join-telemetry` only correlates request-scoped engine records.
 
-## Module map
+## Crate map
 
-| Module | Responsibility |
+```text
+                 agent-loadgen CLI
+                        |
+                        v
+                      replay
+                    /        \
+                trace       generate
+                    \        /
+                      core
+```
+
+`core` has no I/O or workload policy. Trace ingestion and synthetic planning stay independent; replay is the runtime that consumes either planned workload.
+
+| Crate | Responsibility |
 |---|---|
-| `trace.rs` | Trace v1 request/tool parsing, validation, and comparison input |
-| `trace/agentic.rs` | Dynamo-derived session, subagent, and residual-delay lowering |
-| `token_shape.rs` | Safe token alphabet and deterministic block synthesis |
-| `scenario/config.rs` | Strict profile schema, presets, and validation |
-| `scenario/distribution.rs` | Deterministic fixed, uniform, and log-normal sampling |
-| `scenario/model.rs` | Serialized scenario, node, session, tool, and compaction types |
-| `scenario/plan.rs` | Seeded agent, tool, subagent, swarm, and compaction graph |
-| `scheduler.rs` | Stable ready-time queue |
-| `replay.rs` | Shared run options, results, and request execution types |
-| `replay/captured.rs` | Completion-driven captured agent scheduler |
-| `replay/generated.rs` | Dependency-driven closed-loop scenario scheduler |
-| `replay/request.rs` | Request encoding, HTTP transport, and SSE parsing |
-| `replay/artifacts.rs` | Incremental results, histograms, and run gates |
-| `compare.rs` | Source-versus-captured KV shape and arrival comparison |
-| `telemetry.rs` | Policy-neutral request-ID telemetry join |
-| `agent.rs` | Agent-native and canonical Dynamo lineage headers |
-| `clock.rs` | Absolute monotonic sleep |
+| `agent-loadgen-core` | Public request and agent-context contracts, percentile summaries, and the stable ready-time queue. |
+| `agent-loadgen-trace` | Trace v1 parsing, agentic causal lowering, and source-versus-captured comparison. |
+| `agent-loadgen-generate` | Presets, strict TOML profile validation, seeded distributions, and generated scenario planning. |
+| `agent-loadgen-replay` | Token shaping, request transport, captured and generated causal schedulers, run artifacts, and telemetry joins. |
+| `agent-loadgen` | CLI flags and command wiring only. |
+
+See [Workspace architecture](workspace.md) for the dependency rules and change-routing guide.

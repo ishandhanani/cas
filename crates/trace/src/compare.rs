@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::replay::Percentiles;
-use crate::trace::{LoadedTrace, TraceRequest, load_trace};
+use agent_loadgen_core::{AgentContext, Percentiles, TraceRequest, percentiles};
+
+use crate::{LoadedTrace, load_trace};
 
 #[derive(Debug, Deserialize)]
 struct RequestMapping {
@@ -288,8 +289,8 @@ fn compare_loaded(
 }
 
 fn agent_context_core_matches(
-    source: Option<&crate::trace::AgentContext>,
-    replay: Option<&crate::trace::AgentContext>,
+    source: Option<&AgentContext>,
+    replay: Option<&AgentContext>,
 ) -> bool {
     match (source, replay) {
         (None, None) => true,
@@ -363,7 +364,7 @@ fn arrival_error(pairs: &[(&TraceRequest, &TraceRequest, f64)]) -> ArrivalError 
         signed.push(replay.request_received_ms as f64 - expected_arrival_ms);
     }
     let mean_signed = signed.iter().sum::<f64>() / signed.len() as f64;
-    let absolute = crate::replay::percentiles(signed.iter().map(|value| value.abs()).collect());
+    let absolute = percentiles(signed.iter().map(|value| value.abs()).collect());
     ArrivalError {
         absolute,
         mean_signed,
@@ -380,7 +381,7 @@ fn add_mismatch(mismatches: &mut Vec<String>, mismatch: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::AgentContext;
+    use agent_loadgen_core::AgentContext;
 
     fn request(
         id: &str,

@@ -11,9 +11,9 @@ use serde::Serialize;
 
 use super::{Percentiles, ReplayOptions, RequestResult, RunSummary, TrafficKind, millis};
 use crate::clock::TIMER_BACKEND;
-use crate::scenario::CompactionExpectedEffect;
 use crate::token_shape::TokenDictionaryManifest;
-use crate::trace::TraceManifest;
+use agent_loadgen_core::TraceManifest;
+use agent_loadgen_generate::scenario::CompactionExpectedEffect;
 
 pub(super) struct ResultSink {
     writer: BufWriter<File>,
@@ -253,26 +253,6 @@ pub(super) fn dispatch_timing_matches(accumulator: &RunAccumulator, max_limit_ms
         .unwrap_or(usize::MAX);
     accumulator.dispatch_at_or_below_p99_limit >= p99_rank
         && accumulator.dispatch_max_ms <= max_limit_ms
-}
-
-pub(crate) fn percentiles(mut values: Vec<f64>) -> Percentiles {
-    if values.is_empty() {
-        return Percentiles::default();
-    }
-    values.sort_by(f64::total_cmp);
-    Percentiles {
-        min: values[0],
-        p50: percentile(&values, 0.50),
-        p95: percentile(&values, 0.95),
-        p99: percentile(&values, 0.99),
-        max: *values.last().expect("values are not empty"),
-    }
-}
-
-fn percentile(values: &[f64], quantile: f64) -> f64 {
-    let rank = (values.len() as f64 * quantile).ceil() as usize;
-    let index = rank.saturating_sub(1).min(values.len() - 1);
-    values[index]
 }
 
 pub(super) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {

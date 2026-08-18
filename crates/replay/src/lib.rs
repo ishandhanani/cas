@@ -4,23 +4,26 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::AgentKind;
-use crate::scenario::{CompactionExpectedEffect, GeneratedCompactionAttempt};
+use agent_loadgen_core::{AgentContext, AgentKind, TraceManifest};
+use agent_loadgen_generate::scenario::{CompactionExpectedEffect, GeneratedCompactionAttempt};
+
 use crate::token_shape::TokenDictionaryManifest;
-use crate::trace::{AgentContext, TraceManifest};
 
 mod artifacts;
 mod captured;
+mod clock;
 mod generated;
 mod request;
+
+pub mod telemetry;
+pub mod token_shape;
 
 pub use captured::run_agentic_replay;
 pub use generated::run_generated_scenario;
 
-pub(crate) use artifacts::percentiles;
+pub use agent_loadgen_core::{Percentiles, percentiles};
 
 #[cfg(test)]
 use artifacts::{RunAccumulator, dispatch_timing_matches};
@@ -29,7 +32,8 @@ use captured::run_replay;
 #[cfg(test)]
 use request::{chunk_contains_output, normalize_target};
 
-#[derive(Debug, Clone, Copy, Serialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum HttpTransport {
     Auto,
@@ -146,15 +150,6 @@ impl TrafficKind {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct Percentiles {
-    pub min: f64,
-    pub p50: f64,
-    pub p95: f64,
-    pub p99: f64,
-    pub max: f64,
-}
-
 #[derive(Clone)]
 struct ReplayContext {
     client: reqwest::Client,
@@ -192,5 +187,5 @@ fn duration_ns(duration: Duration) -> u64 {
 }
 
 #[cfg(test)]
-#[path = "replay/tests.rs"]
+#[path = "tests.rs"]
 mod tests;

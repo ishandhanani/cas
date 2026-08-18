@@ -19,19 +19,16 @@ use super::{
     TrafficKind, duration_ns,
 };
 use crate::clock::sleep_until;
-use crate::scenario::GeneratedScenario;
-use crate::scheduler::ReadyQueue;
 use crate::token_shape::TokenDictionary;
+use agent_loadgen_core::scheduler::ReadyQueue;
+use agent_loadgen_trace::AgenticTrace;
 
-pub async fn run_generated_scenario(
-    scenario: &GeneratedScenario,
+pub async fn run_agentic_replay(
+    trace: AgenticTrace,
     dictionary: TokenDictionary,
     options: ReplayOptions,
 ) -> Result<RunSummary> {
     validate_options(&options)?;
-    if options.agent != scenario.config.agent {
-        bail!("generated scenario agent does not match the request header adapter");
-    }
     prepare_open_file_limit(options.max_in_flight)?;
     fs::create_dir_all(&options.output_dir).with_context(|| {
         format!(
@@ -39,15 +36,14 @@ pub async fn run_generated_scenario(
             options.output_dir.display()
         )
     })?;
-    write_json(&options.output_dir.join("scenario.json"), scenario)?;
 
     let client = build_http_client(&options)?;
     let target = normalize_target(&options.target);
     let run_id = Uuid::new_v4().to_string();
     let token_manifest = dictionary.manifest().clone();
     let options = Arc::new(options);
-    let request_factory = GeneratedRequestFactory {
-        scenario,
+    let request_factory = CapturedRequestFactory {
+        trace: &trace,
         dictionary: &dictionary,
         client: client.clone(),
         target: target.clone(),
@@ -55,36 +51,36 @@ pub async fn run_generated_scenario(
         options: Arc::clone(&options),
     };
     let mut prepared = std::iter::repeat_with(|| None)
-        .take(scenario.nodes.len())
+        .take(trace.turns.len())
         .collect::<Vec<_>>();
-    let remaining_dependencies = scenario
-        .nodes
+    let remaining_dependencies = trace
+        .turns
         .iter()
-        .map(|node| node.dependencies.len())
+        .map(|turn| turn.dependencies.len())
         .collect::<Vec<_>>();
-    let mut successors = vec![Vec::new(); scenario.nodes.len()];
-    for (ordinal, node) in scenario.nodes.iter().enumerate() {
-        for dependency in &node.dependencies {
-            let outputs = successors
+    let mut successors = vec![Vec::new(); trace.turns.len()];
+    for (ordinal, turn) in trace.turns.iter().enumerate() {
+        for dependency in &turn.dependencies {
+            successors
                 .get_mut(*dependency)
-                .with_context(|| format!("node {ordinal} has missing dependency {dependency}"))?;
-            outputs.push(ordinal);
+                .with_context(|| format!("turn {ordinal} has missing dependency {dependency}"))?
+                .push(ordinal);
         }
     }
-    let mut ready = ReadyQueue::with_capacity(scenario.nodes.len());
-    for (ordinal, node) in scenario.nodes.iter().enumerate() {
-        if node.dependencies.is_empty() {
-            let arrival_ms = node
+    let mut ready = ReadyQueue::with_capacity(trace.turns.len());
+    for (ordinal, turn) in trace.turns.iter().enumerate() {
+        if turn.dependencies.is_empty() {
+            let arrival_ms = turn
                 .root_arrival_ms
-                .with_context(|| format!("root node {ordinal} has no root arrival"))?;
+                .with_context(|| format!("root turn {ordinal} has no root arrival"))?;
             prepared[ordinal] = Some(request_factory.prepare(ordinal)?);
             ready.push(
                 scaled_offset_ns(arrival_ms, options.time_scale)?,
                 ordinal,
                 ordinal,
             );
-        } else if node.root_arrival_ms.is_some() {
-            bail!("dependent node {ordinal} also has a root arrival");
+        } else if turn.root_arrival_ms.is_some() {
+            bail!("dependent turn {ordinal} also has a root arrival");
         }
     }
     warm_connections(&client, &target, &options).await?;
@@ -92,17 +88,17 @@ pub async fn run_generated_scenario(
     let wall_started = Instant::now();
     let base = wall_started
         .checked_add(options.start_delay)
-        .context("generation start delay exceeds the monotonic clock range")?;
+        .context("replay start delay exceeds the monotonic clock range")?;
     let context = ReplayContext { client, base };
     let semaphore = Arc::new(Semaphore::new(options.max_in_flight));
     let mut tasks = JoinSet::new();
-    let mut scheduler = GeneratedSchedulerState {
-        scenario,
+    let mut scheduler = CapturedSchedulerState {
+        trace: &trace,
         request_factory,
         prepared,
         successors,
         remaining_dependencies,
-        dependency_completion_ns: vec![0; scenario.nodes.len()],
+        dependency_completion_ns: vec![0; trace.turns.len()],
         ready,
         sink: ResultSink::create(
             &options.output_dir.join("requests.jsonl"),
@@ -117,7 +113,7 @@ pub async fn run_generated_scenario(
         if let Some(next_ready_ns) = scheduler.ready.next_ready_at_ns() {
             let deadline = base
                 .checked_add(Duration::from_nanos(next_ready_ns))
-                .context("a generated timestamp exceeds the monotonic clock range")?;
+                .context("an agentic replay timestamp exceeds the monotonic clock range")?;
             if Instant::now() < deadline {
                 if tasks.is_empty() {
                     sleep_until(deadline).await;
@@ -127,7 +123,7 @@ pub async fn run_generated_scenario(
                         result = tasks.join_next() => {
                             if let Some(result) = result {
                                 scheduler.release(
-                                    result.context("a generated request task failed")??,
+                                    result.context("an agentic replay task failed")??,
                                 )?;
                                 continue;
                             }
@@ -141,7 +137,7 @@ pub async fn run_generated_scenario(
                 let request = scheduler.take_request(ordinal)?;
                 let scheduled = base
                     .checked_add(Duration::from_nanos(item.ready_at_ns))
-                    .context("a generated timestamp exceeds the monotonic clock range")?;
+                    .context("an agentic replay timestamp exceeds the monotonic clock range")?;
                 let scheduler_wake = Instant::now();
                 let context = context.clone();
                 let semaphore = Arc::clone(&semaphore);
@@ -149,7 +145,7 @@ pub async fn run_generated_scenario(
                     let permit = semaphore
                         .acquire_owned()
                         .await
-                        .context("the generated request semaphore closed")?;
+                        .context("the replay request semaphore closed")?;
                     let result = send_request(
                         &context,
                         scheduled,
@@ -163,25 +159,25 @@ pub async fn run_generated_scenario(
                 });
             }
         } else if let Some(result) = tasks.join_next().await {
-            scheduler.release(result.context("a generated request task failed")??)?;
+            scheduler.release(result.context("an agentic replay task failed")??)?;
         }
     }
 
     scheduler.sink.flush()?;
-    if scheduler.sink.accumulator.request_count != scenario.nodes.len() {
+    if scheduler.sink.accumulator.request_count != trace.turns.len() {
         bail!(
-            "generated graph stalled after {} of {} requests",
+            "agentic replay graph stalled after {} of {} requests",
             scheduler.sink.accumulator.request_count,
-            scenario.nodes.len()
+            trace.turns.len()
         );
     }
     let summary = summarize(
         SummaryIdentity {
-            traffic_kind: TrafficKind::SyntheticKvShape,
+            traffic_kind: TrafficKind::CapturedTrace,
             run_id,
             target: &target,
         },
-        &scenario.trace_manifest,
+        &trace.manifest,
         &token_manifest,
         &options,
         &scheduler.sink.accumulator,
@@ -191,8 +187,8 @@ pub async fn run_generated_scenario(
     Ok(summary)
 }
 
-struct GeneratedRequestFactory<'a> {
-    scenario: &'a GeneratedScenario,
+struct CapturedRequestFactory<'a> {
+    trace: &'a AgenticTrace,
     dictionary: &'a TokenDictionary,
     client: reqwest::Client,
     target: String,
@@ -200,31 +196,31 @@ struct GeneratedRequestFactory<'a> {
     options: Arc<ReplayOptions>,
 }
 
-impl GeneratedRequestFactory<'_> {
+impl CapturedRequestFactory<'_> {
     fn prepare(&self, ordinal: usize) -> Result<PreparedRequest> {
-        let node = self
-            .scenario
-            .nodes
+        let turn = self
+            .trace
+            .turns
             .get(ordinal)
-            .with_context(|| format!("generated node {ordinal} is missing"))?;
+            .with_context(|| format!("agentic replay turn {ordinal} is missing"))?;
         prepare_request(
             &self.client,
             &self.target,
             &self.run_id,
             &self.options,
             self.dictionary,
-            node.request.clone(),
+            turn.request.clone(),
             RequestExecution {
-                output_budget_tokens: node.output_budget_tokens,
-                compaction_attempt: node.compaction_attempt.clone(),
+                output_budget_tokens: Some(turn.request.output_tokens),
+                compaction_attempt: None,
             },
         )
     }
 }
 
-struct GeneratedSchedulerState<'a> {
-    scenario: &'a GeneratedScenario,
-    request_factory: GeneratedRequestFactory<'a>,
+struct CapturedSchedulerState<'a> {
+    trace: &'a AgenticTrace,
+    request_factory: CapturedRequestFactory<'a>,
     prepared: Vec<Option<PreparedRequest>>,
     successors: Vec<Vec<usize>>,
     remaining_dependencies: Vec<usize>,
@@ -235,12 +231,12 @@ struct GeneratedSchedulerState<'a> {
     time_scale: f64,
 }
 
-impl GeneratedSchedulerState<'_> {
+impl CapturedSchedulerState<'_> {
     fn take_request(&mut self, ordinal: usize) -> Result<PreparedRequest> {
         self.prepared
             .get_mut(ordinal)
             .and_then(Option::take)
-            .with_context(|| format!("generated node {ordinal} was released twice"))
+            .with_context(|| format!("agentic replay turn {ordinal} was released twice"))
     }
 
     fn release(
@@ -252,43 +248,41 @@ impl GeneratedSchedulerState<'_> {
         let successors = self
             .successors
             .get(ordinal)
-            .with_context(|| format!("generated node {ordinal} has no successor slot"))?
+            .with_context(|| format!("agentic replay turn {ordinal} has no successor slot"))?
             .clone();
         for successor in successors {
             let ready_at_ns = {
                 let remaining = self
                     .remaining_dependencies
                     .get_mut(successor)
-                    .with_context(|| format!("generated successor {successor} is missing"))?;
-                *remaining = remaining.checked_sub(1).with_context(|| {
-                    format!("generated successor {successor} was released twice")
-                })?;
+                    .with_context(|| format!("agentic successor {successor} is missing"))?;
+                *remaining = remaining
+                    .checked_sub(1)
+                    .with_context(|| format!("agentic successor {successor} was released twice"))?;
                 let dependency_completion_ns = self
                     .dependency_completion_ns
                     .get_mut(successor)
-                    .with_context(|| {
-                        format!("generated successor {successor} is missing timing")
-                    })?;
+                    .with_context(|| format!("agentic successor {successor} has no timing slot"))?;
                 *dependency_completion_ns = (*dependency_completion_ns).max(completed_ns);
                 (*remaining == 0).then_some(*dependency_completion_ns)
             };
             if let Some(dependency_completion_ns) = ready_at_ns {
                 let delay_ns = scaled_offset_ns(
-                    self.scenario.nodes[successor].delay_after_dependencies_ms,
+                    self.trace.turns[successor].delay_after_dependencies_ms,
                     self.time_scale,
                 )?;
                 let slot = self
                     .prepared
                     .get_mut(successor)
-                    .with_context(|| format!("generated successor {successor} is missing"))?;
+                    .with_context(|| format!("agentic successor {successor} is missing"))?;
                 if slot.is_some() {
-                    bail!("generated successor {successor} was prepared twice");
+                    bail!("agentic successor {successor} was prepared twice");
                 }
                 *slot = Some(self.request_factory.prepare(successor)?);
                 self.ready.push(
                     dependency_completion_ns
                         .checked_add(delay_ns)
-                        .context("generated successor timestamp overflow")?,
+                        .context("agentic successor timestamp overflow")?,
                     successor,
                     successor,
                 );
@@ -296,4 +290,13 @@ impl GeneratedSchedulerState<'_> {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+pub(super) async fn run_replay(
+    trace: AgenticTrace,
+    dictionary: TokenDictionary,
+    options: ReplayOptions,
+) -> Result<RunSummary> {
+    run_agentic_replay(trace, dictionary, options).await
 }
