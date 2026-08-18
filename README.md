@@ -4,7 +4,7 @@
 
 It supports two workload modes:
 
-- `replay`: reproduce the token counts, KV-prefix topology, agent headers, output lengths, and recorded arrival schedule from `dynamo.request.trace.v1` traces.
+- `replay`: reproduce token counts, KV-prefix topology, agent headers, output lengths, root arrivals, turn delays, and subagent dependencies from `dynamo.request.trace.v1` traces.
 - `generate`: create deterministic Claude Code, Codex, or OpenCode traffic with tools, compaction, subagents, and swarms.
 
 Prompt text is synthetic. The fidelity contract is request shape, KV reuse, agent lineage, and timing.
@@ -37,7 +37,7 @@ target/release/agent-loadgen replay trace.jsonl.gz \
   --engine-cache-mode ownership=session
 ```
 
-Captured replay is open-loop: later requests keep their recorded arrival times even when earlier requests are slow.
+Captured replay follows Dynamo's agentic policy. Independent roots keep their recorded arrival offsets. Dependent turns wait for actual replay completions plus the delay observed in the source trace.
 
 ## Generate agent traffic
 
@@ -80,6 +80,7 @@ Generated traffic is closed-loop: model latency, tool time, compaction, and bloc
 ## Current boundaries
 
 - Chat Completions is the only supported protocol surface.
+- Every captured request must carry `agent_context`; context-free and mixed traces are rejected.
 - Captured requests must have positive input and output token counts.
 - The tool does not generate meaningful prompt text or execute tools.
 - Cache policy and routing behavior remain owned by Dynamo and the inference engine.

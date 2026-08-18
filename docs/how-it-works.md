@@ -2,16 +2,13 @@
 
 # How agent-loadgen works
 
-`agent-loadgen` has two schedulers with different timing contracts:
+`agent-loadgen` has two graph producers and one causal timing contract:
 
 ```text
 captured trace                         generated profile
       |                                      |
       v                                      v
-absolute arrival times                seeded dependency graph
-      |                                      |
-      v                                      v
-open-loop scheduler                    closed-loop scheduler
+Dynamo-style DAG lowering              seeded dependency graph
       |                                      |
       +------------------+-------------------+
                          |
@@ -22,8 +19,8 @@ open-loop scheduler                    closed-loop scheduler
                 Dynamo Chat Completions
 ```
 
-- Captured replay is open-loop. Responses do not move later recorded arrivals.
-- Generated traffic is closed-loop. A dependency must complete before its successor can become ready.
+- Captured roots use recorded offsets. Captured dependent turns use actual replay completions plus recorded residual delays.
+- Generated roots use configured offsets. Generated dependent turns use actual completions plus sampled delays.
 
 ## Shared request path
 
@@ -43,21 +40,19 @@ Equal source block hashes always produce equal synthetic token blocks. Different
 JSONL or gzip shards
         |
         v
-temporary SQLite index
+request ends + terminal tool events
         |
         v
-global order by arrival + source ordinal
+session and parent-session DAG lowering
         |
         v
-bounded preparation lookahead
-        |
-        v
-absolute monotonic deadlines
+roots: recorded offsets
+dependents: completion + recorded gap
 ```
 
-The trace loader validates all selected records before traffic starts. It rejects missing replay hashes, mixed block sizes, duplicate request IDs, and zero-token input or output records.
+The trace loader validates all selected records before traffic starts. It rejects missing agent context, missing replay hashes, mixed block sizes, duplicate request IDs, zero-token input/output records, and cyclic dependencies.
 
-At runtime, request bodies are prepared only within `--prepare-lookahead-ms` of their arrival. When a deadline arrives, the scheduler offers the request immediately. If the local concurrency limit is full, the request fails fidelity instead of being delayed to a quieter time.
+Each session is sequential. Parent/child context adds subagent launch and join edges. Exact Claude tool metadata wins when present; otherwise Dynamo's timestamp association rules infer the parent request around the child lifetime. Ready requests wait for the local concurrency bound instead of being dropped.
 
 See [Trace replay](replay.md) for the exact trace and timing contract.
 
@@ -140,7 +135,7 @@ See [Compaction](compaction.md) for trigger logic, attempt semantics, retained c
 
 `requests.jsonl` separates local timing stages:
 
-- `scheduled_offset_ms`: intended request release.
+- `scheduled_offset_ms`: intended causal release time.
 - `scheduler_wake_lag_ms`: timer wakeup error.
 - `local_admission_lag_ms`: time waiting for local concurrency.
 - `dispatch_lag_ms`: time from intended release until the HTTP client receives the request.
@@ -159,8 +154,8 @@ Cache policy remains outside this project. `join-telemetry` only correlates requ
 
 | Module | Responsibility |
 |---|---|
-| `trace.rs` | Trace v1 parsing, validation, and in-memory comparison input |
-| `trace/storage.rs` | SQLite ordering, selection, manifests, and bounded reads |
+| `trace.rs` | Trace v1 request/tool parsing, validation, and comparison input |
+| `trace/agentic.rs` | Dynamo-derived session, subagent, and residual-delay lowering |
 | `token_shape.rs` | Safe token alphabet and deterministic block synthesis |
 | `scenario/config.rs` | Strict profile schema, presets, and validation |
 | `scenario/distribution.rs` | Deterministic fixed, uniform, and log-normal sampling |
@@ -168,7 +163,7 @@ Cache policy remains outside this project. `join-telemetry` only correlates requ
 | `scenario/plan.rs` | Seeded agent, tool, subagent, swarm, and compaction graph |
 | `scheduler.rs` | Stable ready-time queue |
 | `replay.rs` | Shared run options, results, and request execution types |
-| `replay/captured.rs` | Absolute-time open-loop trace scheduler |
+| `replay/captured.rs` | Completion-driven captured agent scheduler |
 | `replay/generated.rs` | Dependency-driven closed-loop scenario scheduler |
 | `replay/request.rs` | Request encoding, HTTP transport, and SSE parsing |
 | `replay/artifacts.rs` | Incremental results, histograms, and run gates |

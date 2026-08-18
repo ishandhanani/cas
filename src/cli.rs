@@ -70,24 +70,13 @@ impl TokenArgs {
 
 #[derive(Debug, Args)]
 pub struct TraceSelectionArgs {
-    /// Stop after this many requests.
+    /// Keep only this many earliest model requests.
     #[arg(long)]
     pub max_requests: Option<usize>,
 
-    /// Replay only one agent session.
+    /// Replay one session in isolation.
     #[arg(long)]
     pub session_id: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct TraceStoreArgs {
-    /// Parent directory for the temporary disk-backed trace index.
-    #[arg(long)]
-    pub trace_spool_directory: Option<PathBuf>,
-
-    /// Number of ordered trace requests read from the spool per batch.
-    #[arg(long, default_value_t = 1024)]
-    pub trace_request_batch_size: usize,
 }
 
 #[derive(Debug, Args)]
@@ -103,7 +92,7 @@ pub struct FidelityArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Check that a trace has all shape-replay fields.
+    /// Validate and summarize an agentic trace and its causal graph.
     Inspect {
         /// Raw or wrapped Dynamo request trace files.
         #[arg(required = true)]
@@ -114,9 +103,6 @@ pub enum Command {
 
         #[command(flatten)]
         tokens: TokenArgs,
-
-        #[command(flatten)]
-        store: TraceStoreArgs,
     },
 
     /// Replay a trace against a live Dynamo frontend.
@@ -148,9 +134,6 @@ pub enum Command {
         tokens: TokenArgs,
 
         #[command(flatten)]
-        store: TraceStoreArgs,
-
-        #[command(flatten)]
         fidelity: FidelityArgs,
 
         /// Maximum simultaneous HTTP requests.
@@ -164,10 +147,6 @@ pub enum Command {
         /// HTTP transport used for target requests.
         #[arg(long, value_enum, default_value_t = HttpTransport::Http2PriorKnowledge)]
         http_transport: HttpTransport,
-
-        /// Prepare request bodies this far before their recorded arrival.
-        #[arg(long, default_value_t = 5000)]
-        prepare_lookahead_ms: u64,
 
         /// Flush requests.jsonl after this many completed requests.
         #[arg(long, default_value_t = 1)]
@@ -189,7 +168,7 @@ pub enum Command {
         #[arg(long, default_value_t = 600)]
         timeout_seconds: u64,
 
-        /// Divide recorded arrival offsets by this value.
+        /// Divide root offsets and dependency delays by this value.
         #[arg(long, default_value_t = 1.0)]
         time_scale: f64,
 
@@ -287,10 +266,6 @@ pub enum Command {
         /// requests.jsonl from the replay run.
         #[arg(long)]
         requests: PathBuf,
-
-        /// Divide source arrival offsets by this value before comparison.
-        #[arg(long, default_value_t = 1.0)]
-        time_scale: f64,
 
         /// Maximum allowed p99 frontend arrival error.
         #[arg(long, default_value_t = 5.0)]

@@ -3,11 +3,11 @@
 use std::time::Duration;
 
 use agent_loadgen::compare::{CompareOptions, compare_traces};
-use agent_loadgen::replay::{ReplayOptions, run_generated_scenario, run_stored_replay};
+use agent_loadgen::replay::{ReplayOptions, run_agentic_replay, run_generated_scenario};
 use agent_loadgen::scenario::{GeneratedScenario, GeneratorConfig};
 use agent_loadgen::telemetry::join_engine_telemetry;
 use agent_loadgen::token_shape::TokenDictionary;
-use agent_loadgen::trace::load_stored_trace;
+use agent_loadgen::trace::load_agentic_trace;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
@@ -23,24 +23,32 @@ async fn main() -> Result<()> {
             trace,
             selection,
             tokens,
-            store,
         } => {
-            let trace = load_stored_trace(
+            let trace = load_agentic_trace(
                 &trace,
                 selection.max_requests,
                 selection.session_id.as_deref(),
-                store.trace_spool_directory.as_deref(),
-                store.trace_request_batch_size,
             )?;
             let dictionary = TokenDictionary::new(
                 trace.manifest.trace_block_size,
                 trace.manifest.distinct_sequence_hashes,
                 tokens.load()?,
             )?;
+            let root_requests = trace
+                .turns
+                .iter()
+                .filter(|turn| turn.dependencies.is_empty())
+                .count();
+            let dependency_edges = trace
+                .turns
+                .iter()
+                .map(|turn| turn.dependencies.len())
+                .sum::<usize>();
             let output = serde_json::json!({
-                "fidelity": "shape-strict",
+                "fidelity": "agentic-causal",
                 "source": trace.manifest,
-                "source_storage": trace.storage,
+                "root_requests": root_requests,
+                "dependency_edges": dependency_edges,
                 "token_dictionary": dictionary.manifest()
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -53,12 +61,10 @@ async fn main() -> Result<()> {
             output,
             selection,
             tokens,
-            store,
             fidelity,
             max_in_flight,
             warmup_connections,
             http_transport,
-            prepare_lookahead_ms,
             result_flush_interval,
             max_dispatch_p99_ms,
             max_dispatch_max_ms,
@@ -67,22 +73,19 @@ async fn main() -> Result<()> {
             time_scale,
             headers,
         } => {
-            let trace = load_stored_trace(
+            let trace = load_agentic_trace(
                 &trace,
                 selection.max_requests,
                 selection.session_id.as_deref(),
-                store.trace_spool_directory.as_deref(),
-                store.trace_request_batch_size,
             )?;
             let dictionary = TokenDictionary::new(
                 trace.manifest.trace_block_size,
                 trace.manifest.distinct_sequence_hashes,
                 tokens.load()?,
             )?;
-            let summary = run_stored_replay(
+            let summary = run_agentic_replay(
                 trace,
                 dictionary,
-                Duration::from_millis(prepare_lookahead_ms),
                 ReplayOptions {
                     agent,
                     model,
@@ -192,7 +195,6 @@ async fn main() -> Result<()> {
             source,
             replay,
             requests,
-            time_scale,
             max_arrival_p99_ms,
             max_arrival_max_ms,
         } => {
@@ -201,7 +203,6 @@ async fn main() -> Result<()> {
                 &replay,
                 &requests,
                 CompareOptions {
-                    time_scale,
                     max_arrival_p99_ms,
                     max_arrival_max_ms,
                 },

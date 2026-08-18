@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
 use std::fs;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,93 +11,24 @@ use uuid::Uuid;
 
 use super::artifacts::{ResultSink, SummaryIdentity, summarize, write_json};
 use super::request::{
-    admission_failure, build_http_client, normalize_target, prepare_open_file_limit,
-    prepare_request, scaled_offset_ns, send_request, validate_options, warm_connections,
+    build_http_client, normalize_target, prepare_open_file_limit, prepare_request,
+    scaled_offset_ns, send_request, validate_options, warm_connections,
 };
 use super::{
-    PreparedRequest, ReplayContext, ReplayOptions, RequestExecution, RunSummary, TrafficKind,
-    duration_ns,
+    PreparedRequest, ReplayContext, ReplayOptions, RequestExecution, RequestResult, RunSummary,
+    TrafficKind, duration_ns,
 };
 use crate::clock::sleep_until;
+use crate::scheduler::ReadyQueue;
 use crate::token_shape::TokenDictionary;
-use crate::trace::{
-    StoredTrace, StoredTraceReader, TraceManifest, TraceRequest, TraceStorageManifest,
-};
+use crate::trace::AgenticTrace;
 
-trait RequestStream {
-    fn next_request(&mut self) -> Result<Option<TraceRequest>>;
-}
-
-#[cfg(test)]
-struct MemoryRequestStream {
-    requests: std::vec::IntoIter<TraceRequest>,
-}
-
-#[cfg(test)]
-impl RequestStream for MemoryRequestStream {
-    fn next_request(&mut self) -> Result<Option<TraceRequest>> {
-        Ok(self.requests.next())
-    }
-}
-
-impl RequestStream for StoredTraceReader {
-    fn next_request(&mut self) -> Result<Option<TraceRequest>> {
-        StoredTraceReader::next_request(self)
-    }
-}
-
-#[cfg(test)]
-pub(super) async fn run_replay(
-    trace: crate::trace::LoadedTrace,
+pub async fn run_agentic_replay(
+    trace: AgenticTrace,
     dictionary: TokenDictionary,
-    prepare_lookahead: Duration,
-    options: ReplayOptions,
-) -> Result<RunSummary> {
-    let crate::trace::LoadedTrace { requests, manifest } = trace;
-    run_replay_stream(
-        MemoryRequestStream {
-            requests: requests.into_iter(),
-        },
-        manifest,
-        None,
-        dictionary,
-        prepare_lookahead,
-        options,
-    )
-    .await
-}
-
-pub async fn run_stored_replay(
-    trace: StoredTrace,
-    dictionary: TokenDictionary,
-    prepare_lookahead: Duration,
-    options: ReplayOptions,
-) -> Result<RunSummary> {
-    let manifest = trace.manifest.clone();
-    let storage = trace.storage.clone();
-    run_replay_stream(
-        trace.reader(),
-        manifest,
-        Some(storage),
-        dictionary,
-        prepare_lookahead,
-        options,
-    )
-    .await
-}
-
-async fn run_replay_stream(
-    mut requests: impl RequestStream,
-    source_manifest: TraceManifest,
-    source_storage: Option<TraceStorageManifest>,
-    dictionary: TokenDictionary,
-    prepare_lookahead: Duration,
     options: ReplayOptions,
 ) -> Result<RunSummary> {
     validate_options(&options)?;
-    if prepare_lookahead.is_zero() {
-        bail!("prepare_lookahead must be greater than zero");
-    }
     prepare_open_file_limit(options.max_in_flight)?;
     fs::create_dir_all(&options.output_dir).with_context(|| {
         format!(
@@ -111,216 +41,262 @@ async fn run_replay_stream(
     let target = normalize_target(&options.target);
     let run_id = Uuid::new_v4().to_string();
     let token_manifest = dictionary.manifest().clone();
-    let mut pending = requests.next_request()?;
-    let mut schedule = VecDeque::<(u64, PreparedRequest)>::new();
-    ReplayPreparationContext {
+    let options = Arc::new(options);
+    let request_factory = CapturedRequestFactory {
+        trace: &trace,
         dictionary: &dictionary,
-        client: &client,
-        target: &target,
-        run_id: &run_id,
-        options: &options,
-        first_received_ms: source_manifest.first_request_received_ms,
+        client: client.clone(),
+        target: target.clone(),
+        run_id: run_id.clone(),
+        options: Arc::clone(&options),
+    };
+    let mut prepared = std::iter::repeat_with(|| None)
+        .take(trace.turns.len())
+        .collect::<Vec<_>>();
+    let remaining_dependencies = trace
+        .turns
+        .iter()
+        .map(|turn| turn.dependencies.len())
+        .collect::<Vec<_>>();
+    let mut successors = vec![Vec::new(); trace.turns.len()];
+    for (ordinal, turn) in trace.turns.iter().enumerate() {
+        for dependency in &turn.dependencies {
+            successors
+                .get_mut(*dependency)
+                .with_context(|| format!("turn {ordinal} has missing dependency {dependency}"))?
+                .push(ordinal);
+        }
     }
-    .fill_queue(
-        &mut requests,
-        &mut pending,
-        &mut schedule,
-        duration_ns(prepare_lookahead),
-    )?;
+    let mut ready = ReadyQueue::with_capacity(trace.turns.len());
+    for (ordinal, turn) in trace.turns.iter().enumerate() {
+        if turn.dependencies.is_empty() {
+            let arrival_ms = turn
+                .root_arrival_ms
+                .with_context(|| format!("root turn {ordinal} has no root arrival"))?;
+            prepared[ordinal] = Some(request_factory.prepare(ordinal)?);
+            ready.push(
+                scaled_offset_ns(arrival_ms, options.time_scale)?,
+                ordinal,
+                ordinal,
+            );
+        } else if turn.root_arrival_ms.is_some() {
+            bail!("dependent turn {ordinal} also has a root arrival");
+        }
+    }
     warm_connections(&client, &target, &options).await?;
 
     let wall_started = Instant::now();
     let base = wall_started
         .checked_add(options.start_delay)
         .context("replay start delay exceeds the monotonic clock range")?;
-    let semaphore = Arc::new(Semaphore::new(options.max_in_flight));
-    let options = Arc::new(options);
     let context = ReplayContext { client, base };
+    let semaphore = Arc::new(Semaphore::new(options.max_in_flight));
     let mut tasks = JoinSet::new();
-    let mut sink = ResultSink::create(
-        &options.output_dir.join("requests.jsonl"),
-        options.result_flush_interval,
-        options.max_dispatch_p99_ms,
-    )?;
+    let mut scheduler = CapturedSchedulerState {
+        trace: &trace,
+        request_factory,
+        prepared,
+        successors,
+        remaining_dependencies,
+        dependency_completion_ns: vec![0; trace.turns.len()],
+        ready,
+        sink: ResultSink::create(
+            &options.output_dir.join("requests.jsonl"),
+            options.result_flush_interval,
+            options.max_dispatch_p99_ms,
+        )?,
+        base,
+        time_scale: options.time_scale,
+    };
 
-    while pending.is_some() || !schedule.is_empty() || !tasks.is_empty() {
-        while let Some(result) = tasks.try_join_next() {
-            sink.record(result.context("a replay task failed")??)?;
-        }
-
-        let now_ns = duration_ns(Instant::now().saturating_duration_since(base));
-        let prepare_horizon_ns = now_ns.saturating_add(duration_ns(prepare_lookahead));
-        ReplayPreparationContext {
-            dictionary: &dictionary,
-            client: &context.client,
-            target: &target,
-            run_id: &run_id,
-            options: &options,
-            first_received_ms: source_manifest.first_request_received_ms,
-        }
-        .fill_queue(
-            &mut requests,
-            &mut pending,
-            &mut schedule,
-            prepare_horizon_ns,
-        )?;
-
-        let mut dispatched = false;
-        while schedule.front().is_some_and(|(ready_at_ns, _)| {
-            base.checked_add(Duration::from_nanos(*ready_at_ns))
-                .is_some_and(|deadline| Instant::now() >= deadline)
-        }) {
-            let (ready_at_ns, prepared) = schedule.pop_front().expect("a due request exists");
-            let scheduler_wake = Instant::now();
-            let scheduled = base
-                .checked_add(Duration::from_nanos(ready_at_ns))
-                .expect("the deadline was validated before queue release");
-            let context = context.clone();
-            let permit = match Arc::clone(&semaphore).try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    sink.record(admission_failure(
-                        &context,
-                        scheduled,
-                        scheduler_wake,
-                        ready_at_ns,
-                        prepared,
-                        options.max_in_flight,
-                    ))?;
-                    continue;
-                }
-            };
-            tasks.spawn(async move {
-                send_request(
-                    &context,
-                    scheduled,
-                    scheduler_wake,
-                    ready_at_ns,
-                    prepared,
-                    permit,
-                )
-                .await
-            });
-            dispatched = true;
-        }
-
-        if dispatched {
-            continue;
-        }
-        let next_prepare_ns = pending
-            .as_ref()
-            .map(|request| {
-                scaled_offset_ns(
-                    request.request_received_ms - source_manifest.first_request_received_ms,
-                    options.time_scale,
-                )
-                .map(|ready_at_ns| ready_at_ns.saturating_sub(duration_ns(prepare_lookahead)))
-            })
-            .transpose()?;
-        let next_dispatch_ns = schedule.front().map(|(ready_at_ns, _)| *ready_at_ns);
-        let next_wake_ns = next_prepare_ns.into_iter().chain(next_dispatch_ns).min();
-        match (next_wake_ns, tasks.is_empty()) {
-            (Some(next_wake_ns), false) => {
-                let deadline = base
-                    .checked_add(Duration::from_nanos(next_wake_ns))
-                    .context("a replay timestamp exceeds the monotonic clock range")?;
-                tokio::select! {
-                    () = sleep_until(deadline) => {},
-                    result = tasks.join_next() => {
-                        if let Some(result) = result {
-                            sink.record(result.context("a replay task failed")??)?;
+    while !scheduler.ready.is_empty() || !tasks.is_empty() {
+        if let Some(next_ready_ns) = scheduler.ready.next_ready_at_ns() {
+            let deadline = base
+                .checked_add(Duration::from_nanos(next_ready_ns))
+                .context("an agentic replay timestamp exceeds the monotonic clock range")?;
+            if Instant::now() < deadline {
+                if tasks.is_empty() {
+                    sleep_until(deadline).await;
+                } else {
+                    tokio::select! {
+                        () = sleep_until(deadline) => {},
+                        result = tasks.join_next() => {
+                            if let Some(result) = result {
+                                scheduler.release(
+                                    result.context("an agentic replay task failed")??,
+                                )?;
+                                continue;
+                            }
                         }
                     }
                 }
             }
-            (Some(next_wake_ns), true) => {
-                let deadline = base
-                    .checked_add(Duration::from_nanos(next_wake_ns))
-                    .context("a replay timestamp exceeds the monotonic clock range")?;
-                sleep_until(deadline).await;
+            let now_ns = duration_ns(Instant::now().saturating_duration_since(base));
+            for item in scheduler.ready.pop_due(now_ns, usize::MAX) {
+                let ordinal = item.value;
+                let request = scheduler.take_request(ordinal)?;
+                let scheduled = base
+                    .checked_add(Duration::from_nanos(item.ready_at_ns))
+                    .context("an agentic replay timestamp exceeds the monotonic clock range")?;
+                let scheduler_wake = Instant::now();
+                let context = context.clone();
+                let semaphore = Arc::clone(&semaphore);
+                tasks.spawn(async move {
+                    let permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .context("the replay request semaphore closed")?;
+                    let result = send_request(
+                        &context,
+                        scheduled,
+                        scheduler_wake,
+                        item.ready_at_ns,
+                        request,
+                        permit,
+                    )
+                    .await?;
+                    Ok::<_, anyhow::Error>((ordinal, Instant::now(), result))
+                });
             }
-            (None, false) => {
-                if let Some(result) = tasks.join_next().await {
-                    sink.record(result.context("a replay task failed")??)?;
-                }
-            }
-            (None, true) => break,
+        } else if let Some(result) = tasks.join_next().await {
+            scheduler.release(result.context("an agentic replay task failed")??)?;
         }
     }
 
-    sink.flush()?;
+    scheduler.sink.flush()?;
+    if scheduler.sink.accumulator.request_count != trace.turns.len() {
+        bail!(
+            "agentic replay graph stalled after {} of {} requests",
+            scheduler.sink.accumulator.request_count,
+            trace.turns.len()
+        );
+    }
     let summary = summarize(
         SummaryIdentity {
             traffic_kind: TrafficKind::CapturedTrace,
             run_id,
             target: &target,
-            source_storage,
-            prepare_lookahead: Some(prepare_lookahead),
         },
-        &source_manifest,
+        &trace.manifest,
         &token_manifest,
         &options,
-        &sink.accumulator,
+        &scheduler.sink.accumulator,
         wall_started.elapsed(),
     );
     write_json(&options.output_dir.join("run.json"), &summary)?;
     Ok(summary)
 }
 
-struct ReplayPreparationContext<'a> {
+struct CapturedRequestFactory<'a> {
+    trace: &'a AgenticTrace,
     dictionary: &'a TokenDictionary,
-    client: &'a reqwest::Client,
-    target: &'a str,
-    run_id: &'a str,
-    options: &'a ReplayOptions,
-    first_received_ms: u64,
+    client: reqwest::Client,
+    target: String,
+    run_id: String,
+    options: Arc<ReplayOptions>,
 }
 
-impl ReplayPreparationContext<'_> {
-    fn fill_queue(
-        &self,
-        requests: &mut impl RequestStream,
-        pending: &mut Option<TraceRequest>,
-        schedule: &mut VecDeque<(u64, PreparedRequest)>,
-        prepare_horizon_ns: u64,
+impl CapturedRequestFactory<'_> {
+    fn prepare(&self, ordinal: usize) -> Result<PreparedRequest> {
+        let turn = self
+            .trace
+            .turns
+            .get(ordinal)
+            .with_context(|| format!("agentic replay turn {ordinal} is missing"))?;
+        prepare_request(
+            &self.client,
+            &self.target,
+            &self.run_id,
+            &self.options,
+            self.dictionary,
+            turn.request.clone(),
+            RequestExecution {
+                output_budget_tokens: Some(turn.request.output_tokens),
+                compaction_attempt: None,
+            },
+        )
+    }
+}
+
+struct CapturedSchedulerState<'a> {
+    trace: &'a AgenticTrace,
+    request_factory: CapturedRequestFactory<'a>,
+    prepared: Vec<Option<PreparedRequest>>,
+    successors: Vec<Vec<usize>>,
+    remaining_dependencies: Vec<usize>,
+    dependency_completion_ns: Vec<u64>,
+    ready: ReadyQueue<usize>,
+    sink: ResultSink,
+    base: Instant,
+    time_scale: f64,
+}
+
+impl CapturedSchedulerState<'_> {
+    fn take_request(&mut self, ordinal: usize) -> Result<PreparedRequest> {
+        self.prepared
+            .get_mut(ordinal)
+            .and_then(Option::take)
+            .with_context(|| format!("agentic replay turn {ordinal} was released twice"))
+    }
+
+    fn release(
+        &mut self,
+        (ordinal, completed_at, result): (usize, Instant, RequestResult),
     ) -> Result<()> {
-        while let Some(request) = pending.as_ref() {
-            let ready_at_ns = scaled_offset_ns(
-                request.request_received_ms - self.first_received_ms,
-                self.options.time_scale,
-            )?;
-            if ready_at_ns > prepare_horizon_ns {
-                break;
-            }
-            let request = pending.take().expect("the pending request exists");
-            let ordinal = request.ordinal;
-            if request.output_tokens == 0 {
-                bail!(
-                    "request {} has zero output tokens",
-                    request.source_request_id
+        let completed_ns = duration_ns(completed_at.saturating_duration_since(self.base));
+        self.sink.record(result)?;
+        let successors = self
+            .successors
+            .get(ordinal)
+            .with_context(|| format!("agentic replay turn {ordinal} has no successor slot"))?
+            .clone();
+        for successor in successors {
+            let ready_at_ns = {
+                let remaining = self
+                    .remaining_dependencies
+                    .get_mut(successor)
+                    .with_context(|| format!("agentic successor {successor} is missing"))?;
+                *remaining = remaining
+                    .checked_sub(1)
+                    .with_context(|| format!("agentic successor {successor} was released twice"))?;
+                let dependency_completion_ns = self
+                    .dependency_completion_ns
+                    .get_mut(successor)
+                    .with_context(|| format!("agentic successor {successor} has no timing slot"))?;
+                *dependency_completion_ns = (*dependency_completion_ns).max(completed_ns);
+                (*remaining == 0).then_some(*dependency_completion_ns)
+            };
+            if let Some(dependency_completion_ns) = ready_at_ns {
+                let delay_ns = scaled_offset_ns(
+                    self.trace.turns[successor].delay_after_dependencies_ms,
+                    self.time_scale,
+                )?;
+                let slot = self
+                    .prepared
+                    .get_mut(successor)
+                    .with_context(|| format!("agentic successor {successor} is missing"))?;
+                if slot.is_some() {
+                    bail!("agentic successor {successor} was prepared twice");
+                }
+                *slot = Some(self.request_factory.prepare(successor)?);
+                self.ready.push(
+                    dependency_completion_ns
+                        .checked_add(delay_ns)
+                        .context("agentic successor timestamp overflow")?,
+                    successor,
+                    successor,
                 );
             }
-            let execution = RequestExecution {
-                output_budget_tokens: Some(request.output_tokens),
-                compaction_attempt: None,
-            };
-            let prepared = prepare_request(
-                self.client,
-                self.target,
-                self.run_id,
-                self.options,
-                self.dictionary,
-                request,
-                execution,
-            )?;
-            if let Some((previous_ready_at_ns, previous)) = schedule.back()
-                && (*previous_ready_at_ns, previous.metadata.ordinal) > (ready_at_ns, ordinal)
-            {
-                bail!("the trace request stream is not ordered by timestamp and ordinal");
-            }
-            schedule.push_back((ready_at_ns, prepared));
-            *pending = requests.next_request()?;
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+pub(super) async fn run_replay(
+    trace: AgenticTrace,
+    dictionary: TokenDictionary,
+    options: ReplayOptions,
+) -> Result<RunSummary> {
+    run_agentic_replay(trace, dictionary, options).await
 }

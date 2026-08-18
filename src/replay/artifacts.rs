@@ -13,7 +13,7 @@ use super::{Percentiles, ReplayOptions, RequestResult, RunSummary, TrafficKind, 
 use crate::clock::TIMER_BACKEND;
 use crate::scenario::CompactionExpectedEffect;
 use crate::token_shape::TokenDictionaryManifest;
-use crate::trace::{TraceManifest, TraceStorageManifest};
+use crate::trace::TraceManifest;
 
 pub(super) struct ResultSink {
     writer: BufWriter<File>,
@@ -170,8 +170,6 @@ pub(super) struct SummaryIdentity<'a> {
     pub(super) traffic_kind: TrafficKind,
     pub(super) run_id: String,
     pub(super) target: &'a str,
-    pub(super) source_storage: Option<TraceStorageManifest>,
-    pub(super) prepare_lookahead: Option<Duration>,
 }
 
 pub(super) fn summarize(
@@ -211,9 +209,6 @@ pub(super) fn summarize(
         max_in_flight: options.max_in_flight,
         warmup_connections: options.warmup_connections,
         http_transport: options.http_transport,
-        prepare_lookahead_ms: identity
-            .prepare_lookahead
-            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64),
         result_flush_interval: options.result_flush_interval,
         max_dispatch_p99_ms: options.max_dispatch_p99_ms,
         max_dispatch_max_ms: options.max_dispatch_max_ms,
@@ -225,12 +220,12 @@ pub(super) fn summarize(
             .collect(),
         protocol_surface: "chat_completions",
         traffic_kind: identity.traffic_kind,
+        scheduling_model: identity.traffic_kind.scheduling_model(),
         token_path_verified: options.token_path_verified,
         engine_cache_mode: options.engine_cache_mode.clone(),
         capacity_performance_conclusions_allowed: conclusion_blockers.is_empty(),
         conclusion_blockers,
         source: source.clone(),
-        source_storage: identity.source_storage,
         token_dictionary: dictionary.clone(),
         request_count: accumulator.request_count,
         budgeted_requests: accumulator.budgeted_requests,

@@ -298,29 +298,6 @@ async fn perform_request(
     Ok(result)
 }
 
-pub(super) fn admission_failure(
-    context: &ReplayContext,
-    scheduled: Instant,
-    scheduler_wake: Instant,
-    scheduled_offset_ns: u64,
-    prepared: PreparedRequest,
-    max_in_flight: usize,
-) -> RequestResult {
-    let dispatch = Instant::now();
-    let mut result = request_result_shell(
-        context,
-        scheduled,
-        scheduler_wake,
-        scheduled_offset_ns,
-        &prepared,
-        dispatch,
-    );
-    result.error = Some(format!(
-        "local admission limit {max_in_flight} was exhausted at the recorded arrival; the request was not retimed"
-    ));
-    result
-}
-
 fn request_result_shell(
     context: &ReplayContext,
     scheduled: Instant,

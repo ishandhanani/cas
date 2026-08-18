@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::State;
@@ -14,7 +15,7 @@ use super::request::scaled_offset_ns;
 use super::*;
 use crate::scenario::{GeneratedScenario, GeneratorConfig};
 use crate::token_shape::{SafeTokenAlphabet, TokenDictionary};
-use crate::trace::{AgentContext, LoadedTrace, TraceRequest};
+use crate::trace::{AgentContext, AgenticTrace, AgenticTurn, TraceRequest};
 
 #[test]
 fn target_normalization_accepts_base_or_endpoint() {
@@ -76,6 +77,29 @@ async fn shape_endpoint(
         .unwrap()
 }
 
+#[derive(Clone, Default)]
+struct DelayedCapture(Arc<Mutex<Vec<Instant>>>);
+
+async fn delayed_shape_endpoint(State(capture): State<DelayedCapture>) -> Response<Body> {
+    let call_index = {
+        let mut calls = capture.0.lock().unwrap();
+        calls.push(Instant::now());
+        calls.len()
+    };
+    if call_index == 1 {
+        tokio::time::sleep(Duration::from_millis(75)).await;
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        )))
+        .unwrap()
+}
+
 #[tokio::test]
 async fn replay_sends_shape_and_agent_headers() {
     let capture = Capture::default();
@@ -103,8 +127,16 @@ async fn replay_sends_shape_and_agent_headers() {
             input_trigger: Some("tool_result".to_string()),
         }),
     };
-    let trace = LoadedTrace {
-        requests: vec![request.clone()],
+    let trace = AgenticTrace {
+        turns: vec![AgenticTurn {
+            request: request.clone(),
+            dependencies: Vec::new(),
+            root_arrival_ms: Some(0),
+            delay_after_dependencies_ms: 0,
+            non_tool_delay_ms: 0,
+            tool_wait_ms: 0,
+            tool_events: Vec::new(),
+        }],
         manifest: TraceManifest {
             request_count: 1,
             session_count: 1,
@@ -128,7 +160,6 @@ async fn replay_sends_shape_and_agent_headers() {
     let summary = run_replay(
         trace,
         dictionary,
-        Duration::from_millis(100),
         ReplayOptions {
             agent: AgentKind::Codex,
             model: "test-model".to_string(),
@@ -209,7 +240,7 @@ async fn recorded_scheduler_handles_tied_millisecond_arrivals() {
             trace_block_size: 16,
             input_sequence_hashes: vec![11],
             agent_context: Some(AgentContext {
-                session_id: format!("thread-{}", ordinal % 12),
+                session_id: format!("thread-{ordinal}"),
                 parent_session_id: None,
                 compaction: None,
                 input_trigger: Some("user_message".to_string()),
@@ -221,11 +252,24 @@ async fn recorded_scheduler_handles_tied_millisecond_arrivals() {
         SafeTokenAlphabet::from_unverified_range(100, 1024, &[]).unwrap(),
     )
     .unwrap();
-    let trace = LoadedTrace {
-        requests,
+    let trace = AgenticTrace {
+        turns: requests
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(ordinal, request)| AgenticTurn {
+                request,
+                dependencies: Vec::new(),
+                root_arrival_ms: Some((ordinal / 3) as u64),
+                delay_after_dependencies_ms: 0,
+                non_tool_delay_ms: 0,
+                tool_wait_ms: 0,
+                tool_events: Vec::new(),
+            })
+            .collect(),
         manifest: TraceManifest {
             request_count: 96,
-            session_count: 12,
+            session_count: 96,
             requests_with_agent_context: 96,
             first_request_received_ms: 1_000,
             last_request_received_ms: 1_031,
@@ -241,7 +285,6 @@ async fn recorded_scheduler_handles_tied_millisecond_arrivals() {
     let summary = run_replay(
         trace,
         dictionary,
-        Duration::from_millis(100),
         ReplayOptions {
             agent: AgentKind::Codex,
             model: "test-model".to_string(),
@@ -268,6 +311,112 @@ async fn recorded_scheduler_handles_tied_millisecond_arrivals() {
     assert_eq!(summary.output_length_matches, 96);
     assert!(summary.scheduler_wake_lag_ms.p99 < 100.0);
     assert!(summary.dispatch_lag_ms.p99 < 100.0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn captured_successor_waits_for_actual_completion_plus_recorded_gap() {
+    let capture = DelayedCapture::default();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(delayed_shape_endpoint))
+        .with_state(capture.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let requests = (0..2)
+        .map(|ordinal| TraceRequest {
+            ordinal,
+            source_request_id: format!("source-{ordinal}"),
+            source_x_request_id: None,
+            source_model: None,
+            input_tokens: 3,
+            output_tokens: 2,
+            request_received_ms: 1_000 + ordinal as u64 * 150,
+            trace_block_size: 16,
+            input_sequence_hashes: vec![11],
+            agent_context: Some(AgentContext {
+                session_id: "thread".to_string(),
+                parent_session_id: None,
+                compaction: None,
+                input_trigger: Some(if ordinal == 0 {
+                    "user_message".to_string()
+                } else {
+                    "tool_result".to_string()
+                }),
+            }),
+        })
+        .collect::<Vec<_>>();
+    let dictionary = TokenDictionary::build(
+        &requests,
+        SafeTokenAlphabet::from_unverified_range(100, 1024, &[]).unwrap(),
+    )
+    .unwrap();
+    let trace = AgenticTrace {
+        turns: vec![
+            AgenticTurn {
+                request: requests[0].clone(),
+                dependencies: Vec::new(),
+                root_arrival_ms: Some(0),
+                delay_after_dependencies_ms: 0,
+                non_tool_delay_ms: 0,
+                tool_wait_ms: 0,
+                tool_events: Vec::new(),
+            },
+            AgenticTurn {
+                request: requests[1].clone(),
+                dependencies: vec![0],
+                root_arrival_ms: None,
+                delay_after_dependencies_ms: 50,
+                non_tool_delay_ms: 50,
+                tool_wait_ms: 0,
+                tool_events: Vec::new(),
+            },
+        ],
+        manifest: TraceManifest {
+            request_count: 2,
+            session_count: 1,
+            requests_with_agent_context: 2,
+            first_request_received_ms: 1_000,
+            last_request_received_ms: 1_150,
+            duration_ms: 150,
+            input_tokens: 6,
+            output_tokens: 4,
+            distinct_sequence_hashes: 1,
+            trace_block_size: 16,
+            source_digest_sha256: "source".to_string(),
+        },
+    };
+    let output = tempdir().unwrap();
+    let summary = run_replay(
+        trace,
+        dictionary,
+        ReplayOptions {
+            agent: AgentKind::Codex,
+            model: "test-model".to_string(),
+            target: format!("http://{address}"),
+            output_dir: output.path().to_path_buf(),
+            max_in_flight: 2,
+            warmup_connections: 0,
+            http_transport: HttpTransport::Auto,
+            result_flush_interval: 1,
+            max_dispatch_p99_ms: 100.0,
+            max_dispatch_max_ms: 100.0,
+            start_delay: Duration::from_millis(5),
+            timeout: Duration::from_secs(5),
+            time_scale: 1.0,
+            token_path_verified: false,
+            engine_cache_mode: BTreeMap::new(),
+            static_headers: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(summary.succeeded, 2);
+    let calls = capture.0.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].duration_since(calls[0]) >= Duration::from_millis(120));
     server.abort();
 }
 

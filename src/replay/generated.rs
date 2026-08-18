@@ -180,8 +180,6 @@ pub async fn run_generated_scenario(
             traffic_kind: TrafficKind::SyntheticKvShape,
             run_id,
             target: &target,
-            source_storage: None,
-            prepare_lookahead: None,
         },
         &scenario.trace_manifest,
         &token_manifest,

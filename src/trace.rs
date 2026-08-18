@@ -1,4 +1,7 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+
+//! Dynamo request-trace loading and agentic lowering inputs.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
@@ -7,13 +10,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::MultiGzDecoder;
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-mod storage;
+mod agentic;
 
-pub(crate) use storage::StoredTraceReader;
-pub use storage::{StoredTrace, TraceStorageManifest, load_stored_trace};
+pub use agentic::{AgenticToolEvent, AgenticTrace, AgenticTurn};
 
 const TRACE_SCHEMA_V1: &str = "dynamo.request.trace.v1";
 
@@ -21,10 +24,13 @@ const TRACE_SCHEMA_V1: &str = "dynamo.request.trace.v1";
 struct TraceRecord {
     schema: String,
     event_type: String,
+    event_time_unix_ms: u64,
     #[serde(default)]
     agent_context: Option<AgentContext>,
     #[serde(default)]
     request: Option<RequestMetrics>,
+    #[serde(default)]
+    tool: Option<ToolMetrics>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -52,6 +58,8 @@ struct RequestMetrics {
     #[serde(default)]
     request_received_ms: Option<u64>,
     #[serde(default)]
+    total_time_ms: Option<f64>,
+    #[serde(default)]
     replay: Option<ReplayMetrics>,
 }
 
@@ -60,6 +68,72 @@ struct ReplayMetrics {
     trace_block_size: usize,
     input_length: usize,
     input_sequence_hashes: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ToolMetrics {
+    tool_call_id: String,
+    tool_class: String,
+    #[serde(default)]
+    claude: Option<ClaudeToolReplayMetrics>,
+    #[serde(default)]
+    started_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    ended_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    duration_ms: Option<f64>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    output_bytes: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    error_type: Option<String>,
+}
+
+/// Claude-only evidence used to disambiguate a subagent launch and join.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClaudeToolReplayMetrics {
+    pub(crate) source_request_id: String,
+    #[serde(default)]
+    pub(crate) consumer_request_id: Option<String>,
+    #[serde(default)]
+    pub(crate) child_session_id: Option<String>,
+    pub(crate) execution_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum JsonLineEnvelope {
+    Object(TraceRecordEnvelope),
+    Other(IgnoredAny),
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceRecordEnvelope {
+    #[serde(default)]
+    event_type: Option<String>,
+    #[serde(default)]
+    event: Option<TraceEventEnvelope>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TraceEventEnvelope {
+    Object(TraceEventFields),
+    Other(IgnoredAny),
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceEventFields {
+    #[serde(default)]
+    event_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WrappedTraceRecord {
+    event: TraceRecord,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -92,10 +166,40 @@ pub struct TraceManifest {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct RequestEntry {
+    pub(crate) request: TraceRequest,
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ToolEntry {
+    pub(crate) session_id: String,
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
+    pub(crate) tool_call_id: String,
+    pub(crate) tool_class: String,
+    pub(crate) claude: Option<ClaudeToolReplayMetrics>,
+    pub(crate) status: String,
+    pub(crate) duration_ms: f64,
+    pub(crate) output_bytes: Option<u64>,
+    pub(crate) output_tokens: Option<u64>,
+    pub(crate) error_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct LoadedTrace {
-    pub requests: Vec<TraceRequest>,
-    #[cfg(test)]
-    pub manifest: TraceManifest,
+    pub(crate) requests: Vec<RequestEntry>,
+    pub(crate) tools: Vec<ToolEntry>,
+    pub(crate) manifest: TraceManifest,
+}
+
+pub fn load_agentic_trace(
+    paths: &[PathBuf],
+    max_requests: Option<usize>,
+    session_id: Option<&str>,
+) -> Result<AgenticTrace> {
+    agentic::lower(load_trace(paths, max_requests, session_id)?)
 }
 
 pub(crate) fn load_trace(
@@ -108,18 +212,54 @@ pub(crate) fn load_trace(
     }
 
     let mut requests = Vec::new();
+    let mut tools = Vec::new();
+    let mut request_ids = HashSet::new();
     let mut source_digest = Sha256::new();
     for path in paths {
-        load_path(path, &mut requests, &mut source_digest)?;
+        read_path(path, &mut source_digest, |record| {
+            match record.event_type.as_str() {
+                "request_payload" | "tool_start" => {}
+                "request_end" => {
+                    let entry = compile_request(record).context("invalid request_end record")?;
+                    if !request_ids.insert(entry.request.source_request_id.clone()) {
+                        bail!("duplicate request_id {}", entry.request.source_request_id);
+                    }
+                    requests.push(entry);
+                }
+                "tool_end" | "tool_error" => {
+                    let terminal_event = record.event_type.clone();
+                    if let Some(tool) = compile_tool(record, &terminal_event) {
+                        tools.push(tool);
+                    }
+                }
+                event_type => bail!(
+                    "request trace only supports request_end, request_payload, and tool_* events, got {event_type}"
+                ),
+            }
+            Ok(())
+        })?;
     }
     if requests.is_empty() {
-        bail!("the trace contains no request_end records");
+        bail!("the trace contains no request_end records with replay metadata");
+    }
+    if requests
+        .iter()
+        .any(|entry| entry.request.agent_context.is_none())
+    {
+        bail!("agent-loadgen requires agent_context on every request");
     }
 
-    requests.sort_by_key(|request| (request.request_received_ms, request.ordinal));
+    requests.sort_by(|left, right| {
+        (left.start_ms, left.end_ms, &left.request.source_request_id).cmp(&(
+            right.start_ms,
+            right.end_ms,
+            &right.request.source_request_id,
+        ))
+    });
     if let Some(session_id) = session_id {
-        requests.retain(|request| {
-            request
+        requests.retain(|entry| {
+            entry
+                .request
                 .agent_context
                 .as_ref()
                 .is_some_and(|context| context.session_id == session_id)
@@ -131,31 +271,28 @@ pub(crate) fn load_trace(
     if let Some(limit) = max_requests {
         requests.truncate(limit);
     }
-    for (ordinal, request) in requests.iter_mut().enumerate() {
-        request.ordinal = ordinal;
+    if requests.is_empty() {
+        bail!("the selected trace contains no requests");
+    }
+    for (ordinal, entry) in requests.iter_mut().enumerate() {
+        entry.request.ordinal = ordinal;
     }
 
-    let source_digest = source_digest.finalize();
-    #[cfg(test)]
-    let manifest = make_manifest(&requests, source_digest.as_slice())?;
-    #[cfg(not(test))]
-    make_manifest(&requests, source_digest.as_slice())?;
+    let selected_sessions = requests
+        .iter()
+        .filter_map(|entry| entry.request.agent_context.as_ref())
+        .map(|context| context.session_id.as_str())
+        .collect::<HashSet<_>>();
+    tools.retain(|tool| selected_sessions.contains(tool.session_id.as_str()));
+
+    let manifest = make_manifest(
+        requests.iter().map(|entry| &entry.request),
+        source_digest.finalize().as_slice(),
+    )?;
     Ok(LoadedTrace {
         requests,
-        #[cfg(test)]
+        tools,
         manifest,
-    })
-}
-
-fn load_path(path: &Path, requests: &mut Vec<TraceRequest>, digest: &mut Sha256) -> Result<()> {
-    read_path(path, digest, |record| {
-        if record.event_type != "request_end" {
-            return Ok(());
-        }
-        let request =
-            compile_request(record, requests.len()).context("invalid request_end record")?;
-        requests.push(request);
-        Ok(())
     })
 }
 
@@ -173,21 +310,16 @@ fn read_path(
         }
         digest.update(line.as_bytes());
         digest.update(b"\n");
-
-        let value: serde_json::Value = serde_json::from_str(&line)
-            .with_context(|| format!("invalid JSON at {}:{}", path.display(), line_index + 1))?;
-        let record_value = value
-            .get("event")
-            .or_else(|| value.get("record"))
-            .unwrap_or(&value);
-        let record: TraceRecord =
-            serde_json::from_value(record_value.clone()).with_context(|| {
-                format!(
-                    "invalid trace record at {}:{}",
-                    path.display(),
-                    line_index + 1
-                )
-            })?;
+        let Some(record) = parse_trace_record(&line).with_context(|| {
+            format!(
+                "invalid trace record at {}:{}",
+                path.display(),
+                line_index + 1
+            )
+        })?
+        else {
+            continue;
+        };
         if record.schema != TRACE_SCHEMA_V1 {
             bail!(
                 "unsupported trace schema {:?} at {}:{}",
@@ -207,6 +339,30 @@ fn read_path(
     Ok(())
 }
 
+fn parse_trace_record(line: &str) -> Result<Option<TraceRecord>> {
+    let envelope = match serde_json::from_str::<JsonLineEnvelope>(line)? {
+        JsonLineEnvelope::Object(envelope) => envelope,
+        JsonLineEnvelope::Other(_) => return Ok(None),
+    };
+    match envelope.event {
+        Some(TraceEventEnvelope::Object(event)) => {
+            if event.event_type.as_deref() == Some("request_payload") {
+                return Ok(None);
+            }
+            Ok(Some(
+                serde_json::from_str::<WrappedTraceRecord>(line)?.event,
+            ))
+        }
+        Some(TraceEventEnvelope::Other(_)) => Ok(None),
+        None => {
+            if envelope.event_type.as_deref() == Some("request_payload") {
+                return Ok(None);
+            }
+            Ok(Some(serde_json::from_str(line)?))
+        }
+    }
+}
+
 fn open_trace(path: &Path) -> Result<Box<dyn BufRead>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let is_gzip = path.extension().is_some_and(|extension| extension == "gz");
@@ -218,12 +374,13 @@ fn open_trace(path: &Path) -> Result<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::new(reader)))
 }
 
-fn compile_request(record: TraceRecord, ordinal: usize) -> Result<TraceRequest> {
+fn compile_request(record: TraceRecord) -> Result<RequestEntry> {
     let request = record
         .request
         .context("request_end has no request metrics")?;
     let replay = request
         .replay
+        .as_ref()
         .context("request_end has no replay metrics")?;
     if replay.trace_block_size == 0 {
         bail!("trace_block_size must be greater than zero");
@@ -259,40 +416,95 @@ fn compile_request(record: TraceRecord, ordinal: usize) -> Result<TraceRequest> 
     let request_received_ms = request
         .request_received_ms
         .context("request has no request_received_ms")?;
+    let total_ms = request
+        .total_time_ms
+        .map(|value| value.max(0.0).round() as u64)
+        .unwrap_or_else(|| {
+            record
+                .event_time_unix_ms
+                .saturating_sub(request_received_ms)
+        });
+    let request_completed_ms = request_received_ms.saturating_add(total_ms);
 
-    Ok(TraceRequest {
-        ordinal,
-        source_request_id: request.request_id,
-        source_x_request_id: request.x_request_id,
-        source_model: request.model,
-        input_tokens: replay.input_length,
-        output_tokens,
-        request_received_ms,
-        trace_block_size: replay.trace_block_size,
-        input_sequence_hashes: replay.input_sequence_hashes,
-        agent_context: record.agent_context,
+    Ok(RequestEntry {
+        start_ms: saturating_i64(request_received_ms),
+        end_ms: saturating_i64(request_completed_ms),
+        request: TraceRequest {
+            ordinal: 0,
+            source_request_id: request.request_id,
+            source_x_request_id: request.x_request_id,
+            source_model: request.model,
+            input_tokens: replay.input_length,
+            output_tokens,
+            request_received_ms,
+            trace_block_size: replay.trace_block_size,
+            input_sequence_hashes: replay.input_sequence_hashes.clone(),
+            agent_context: record.agent_context,
+        },
     })
 }
 
-fn make_manifest(requests: &[TraceRequest], source_digest: &[u8]) -> Result<TraceManifest> {
+fn compile_tool(record: TraceRecord, terminal_event: &str) -> Option<ToolEntry> {
+    let context = record.agent_context?;
+    let tool = record.tool?;
+    let end_ms = tool
+        .ended_at_unix_ms
+        .map(saturating_i64)
+        .unwrap_or_else(|| saturating_i64(record.event_time_unix_ms));
+    let start_ms = tool
+        .started_at_unix_ms
+        .map(saturating_i64)
+        .or_else(|| {
+            tool.duration_ms
+                .map(|duration| end_ms.saturating_sub(duration.max(0.0).round() as i64))
+        })
+        .unwrap_or(end_ms);
+    if end_ms < start_ms {
+        return None;
+    }
+    let duration_ms = tool
+        .duration_ms
+        .unwrap_or_else(|| (end_ms - start_ms).max(0) as f64);
+    Some(ToolEntry {
+        session_id: context.session_id,
+        start_ms,
+        end_ms,
+        tool_call_id: tool.tool_call_id,
+        tool_class: tool.tool_class,
+        claude: tool.claude,
+        status: tool.status.unwrap_or_else(|| {
+            if terminal_event == "tool_error" {
+                "error".to_string()
+            } else {
+                "succeeded".to_string()
+            }
+        }),
+        duration_ms,
+        output_bytes: tool.output_bytes,
+        output_tokens: tool.output_tokens,
+        error_type: tool.error_type,
+    })
+}
+
+fn make_manifest<'a>(
+    requests: impl IntoIterator<Item = &'a TraceRequest>,
+    source_digest: &[u8],
+) -> Result<TraceManifest> {
+    let requests = requests.into_iter().collect::<Vec<_>>();
     let first = requests.first().context("trace has no requests")?;
     let last = requests.last().context("trace has no requests")?;
-    let mut request_ids = HashSet::with_capacity(requests.len());
     let mut sessions = BTreeSet::new();
     let mut hashes = BTreeSet::new();
     let mut block_sizes = BTreeSet::new();
     let mut input_tokens = 0_u64;
     let mut output_tokens = 0_u64;
-    let mut requests_with_agent_context = 0;
 
-    for request in requests {
-        if !request_ids.insert(&request.source_request_id) {
-            bail!("duplicate request_id {}", request.source_request_id);
-        }
-        if let Some(context) = &request.agent_context {
-            requests_with_agent_context += 1;
-            sessions.insert(&context.session_id);
-        }
+    for request in &requests {
+        let context = request
+            .agent_context
+            .as_ref()
+            .context("agent-loadgen requires agent_context on every request")?;
+        sessions.insert(&context.session_id);
         hashes.extend(request.input_sequence_hashes.iter().copied());
         block_sizes.insert(request.trace_block_size);
         input_tokens = input_tokens
@@ -309,16 +521,22 @@ fn make_manifest(requests: &[TraceRequest], source_digest: &[u8]) -> Result<Trac
     Ok(TraceManifest {
         request_count: requests.len(),
         session_count: sessions.len(),
-        requests_with_agent_context,
+        requests_with_agent_context: requests.len(),
         first_request_received_ms: first.request_received_ms,
         last_request_received_ms: last.request_received_ms,
-        duration_ms: last.request_received_ms - first.request_received_ms,
+        duration_ms: last
+            .request_received_ms
+            .saturating_sub(first.request_received_ms),
         input_tokens,
         output_tokens,
         distinct_sequence_hashes: hashes.len(),
         trace_block_size: *block_sizes.first().expect("one block size exists"),
         source_digest_sha256: hex::encode(source_digest),
     })
+}
+
+fn saturating_i64(value: u64) -> i64 {
+    value.min(i64::MAX as u64) as i64
 }
 
 #[cfg(test)]
@@ -329,183 +547,104 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn loads_raw_and_wrapped_records() {
-        let mut file = NamedTempFile::new().unwrap();
-        let record = serde_json::json!({
+    fn request_record(
+        request_id: &str,
+        session_id: &str,
+        received_ms: u64,
+        completed_ms: u64,
+        hashes: &[u64],
+    ) -> serde_json::Value {
+        serde_json::json!({
             "schema": TRACE_SCHEMA_V1,
             "event_type": "request_end",
-            "event_time_unix_ms": 2000,
-            "agent_context": {"session_id": "thread-1"},
+            "event_time_unix_ms": completed_ms,
+            "agent_context": {"session_id": session_id},
             "request": {
-                "request_id": "req-1",
-                "input_tokens": 3,
+                "request_id": request_id,
+                "input_tokens": hashes.len() * 2,
                 "output_tokens": 2,
-                "request_received_ms": 1000,
+                "request_received_ms": received_ms,
                 "replay": {
                     "trace_block_size": 2,
-                    "input_length": 3,
-                    "input_sequence_hashes": [11, 22]
+                    "input_length": hashes.len() * 2,
+                    "input_sequence_hashes": hashes
                 }
             }
-        });
-        writeln!(file, "{}", record).unwrap();
-        let wrapped = serde_json::json!({"timestamp": 1, "event": {
-            "schema": TRACE_SCHEMA_V1,
-            "event_type": "request_end",
-            "event_time_unix_ms": 2100,
-            "request": {
-                "request_id": "req-2",
-                "output_tokens": 4,
-                "request_received_ms": 1025,
-                "replay": {
-                    "trace_block_size": 2,
-                    "input_length": 4,
-                    "input_sequence_hashes": [11, 33]
-                }
-            }
-        }});
-        writeln!(file, "{}", wrapped).unwrap();
-
-        let trace = load_trace(&[file.path().to_path_buf()], None, None).unwrap();
-        assert_eq!(trace.manifest.request_count, 2);
-        assert_eq!(trace.manifest.duration_ms, 25);
-        assert_eq!(trace.manifest.distinct_sequence_hashes, 3);
-        assert_eq!(trace.requests[1].input_tokens, 4);
+        })
     }
 
     #[test]
-    fn stored_trace_orders_before_applying_limit() {
+    fn loads_and_lowers_agent_requests() {
         let mut file = NamedTempFile::new().unwrap();
-        for (request_id, received_ms, hash) in [("late", 1025, 22), ("early", 1000, 11)] {
-            writeln!(
-                file,
-                "{}",
-                serde_json::json!({
-                    "schema": TRACE_SCHEMA_V1,
-                    "event_type": "request_end",
-                    "agent_context": {"session_id": "thread-1"},
-                    "request": {
-                        "request_id": request_id,
-                        "output_tokens": 2,
-                        "request_received_ms": received_ms,
-                        "replay": {
-                            "trace_block_size": 16,
-                            "input_length": 3,
-                            "input_sequence_hashes": [hash]
-                        }
-                    }
-                })
-            )
-            .unwrap();
-        }
-
-        let stored = load_stored_trace(
-            &[file.path().to_path_buf()],
-            None,
-            Some("thread-1"),
-            None,
-            2,
+        writeln!(
+            file,
+            "{}",
+            request_record("r1", "thread-1", 1_000, 1_100, &[11])
         )
         .unwrap();
-        assert_eq!(stored.manifest.request_count, 2);
-        assert_eq!(stored.manifest.distinct_sequence_hashes, 2);
-        assert_eq!(stored.storage.backend, "sqlite-spool-v1");
-        let mut reader = stored.reader();
-        assert_eq!(
-            reader.next_request().unwrap().unwrap().source_request_id,
-            "early"
-        );
-        assert_eq!(
-            reader.next_request().unwrap().unwrap().source_request_id,
-            "late"
-        );
-        assert!(reader.next_request().unwrap().is_none());
-    }
-
-    #[test]
-    fn rejects_incomplete_hash_coverage() {
-        let record: TraceRecord = serde_json::from_value(serde_json::json!({
-            "schema": TRACE_SCHEMA_V1,
-            "event_type": "request_end",
-            "request": {
-                "request_id": "req-1",
-                "output_tokens": 2,
-                "request_received_ms": 1000,
-                "replay": {
-                    "trace_block_size": 2,
-                    "input_length": 3,
-                    "input_sequence_hashes": [11]
-                }
-            }
-        }))
+        writeln!(
+            file,
+            "{}",
+            request_record("r2", "thread-1", 1_300, 1_400, &[11, 22])
+        )
         .unwrap();
-        assert!(compile_request(record, 0).is_err());
+
+        let trace = load_agentic_trace(&[file.path().to_path_buf()], None, None).unwrap();
+        assert_eq!(trace.turns.len(), 2);
+        assert!(trace.turns[0].dependencies.is_empty());
+        assert_eq!(trace.turns[0].root_arrival_ms, Some(0));
+        assert_eq!(trace.turns[1].dependencies, vec![0]);
+        assert_eq!(trace.turns[1].delay_after_dependencies_ms, 200);
     }
 
     #[test]
-    fn rejects_zero_output_requests() {
-        let record = serde_json::json!({
-            "schema": TRACE_SCHEMA_V1,
-            "event_type": "request_end",
-            "agent_context": {"session_id": "thread-1"},
-            "request": {
-                "request_id": "zero-output",
-                "output_tokens": 0,
-                "request_received_ms": 1000,
-                "replay": {
-                    "trace_block_size": 16,
-                    "input_length": 3,
-                    "input_sequence_hashes": [11]
-                }
-            }
-        });
-        assert!(
-            compile_request(serde_json::from_value(record).unwrap(), 0)
-                .unwrap_err()
-                .to_string()
-                .contains("has zero output tokens")
-        );
-    }
-
-    #[test]
-    #[ignore = "large trace stress"]
-    fn stored_trace_handles_one_hundred_thousand_requests_in_batches() {
-        const REQUESTS: usize = 100_000;
+    fn rejects_context_free_requests() {
         let mut file = NamedTempFile::new().unwrap();
-        for ordinal in (0..REQUESTS).rev() {
-            writeln!(
-                file,
-                "{}",
-                serde_json::json!({
-                    "schema": TRACE_SCHEMA_V1,
-                    "event_type": "request_end",
-                    "agent_context": {"session_id": format!("session-{}", ordinal % 100)},
-                    "request": {
-                        "request_id": format!("request-{ordinal}"),
-                        "output_tokens": 8,
-                        "request_received_ms": ordinal,
-                        "replay": {
-                            "trace_block_size": 16,
-                            "input_length": 32,
-                            "input_sequence_hashes": [ordinal % 1000, 10_000 + ordinal % 1000]
-                        }
-                    }
-                })
-            )
-            .unwrap();
-        }
-        let stored =
-            load_stored_trace(&[file.path().to_path_buf()], None, None, None, 128).unwrap();
-        assert_eq!(stored.manifest.request_count, REQUESTS);
-        assert_eq!(stored.manifest.session_count, 100);
-        assert_eq!(stored.manifest.distinct_sequence_hashes, 2_000);
-        let mut reader = stored.reader();
-        let mut count = 0;
-        while let Some(request) = reader.next_request().unwrap() {
-            assert_eq!(request.request_received_ms, count as u64);
-            count += 1;
-        }
-        assert_eq!(count, REQUESTS);
+        let mut record = request_record("r1", "thread-1", 1_000, 1_100, &[11]);
+        record.as_object_mut().unwrap().remove("agent_context");
+        writeln!(file, "{record}").unwrap();
+
+        let error = load_agentic_trace(&[file.path().to_path_buf()], None, None).unwrap_err();
+        assert!(error.to_string().contains("requires agent_context"));
+    }
+
+    #[test]
+    fn rejects_mixed_agent_and_context_free_requests() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            request_record("r1", "thread-1", 1_000, 1_100, &[11])
+        )
+        .unwrap();
+        let mut record = request_record("r2", "thread-1", 1_200, 1_300, &[22]);
+        record.as_object_mut().unwrap().remove("agent_context");
+        writeln!(file, "{record}").unwrap();
+
+        let error = load_agentic_trace(&[file.path().to_path_buf()], None, None).unwrap_err();
+        assert!(error.to_string().contains("requires agent_context"));
+    }
+
+    #[test]
+    fn loads_wrapped_records_and_sorts_before_limit() {
+        let mut file = NamedTempFile::new().unwrap();
+        let late = request_record("late", "thread-1", 1_200, 1_300, &[22]);
+        let early = request_record("early", "thread-1", 1_000, 1_100, &[11]);
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"timestamp": 1, "event": late})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"timestamp": 2, "event": early})
+        )
+        .unwrap();
+
+        let trace = load_agentic_trace(&[file.path().to_path_buf()], Some(1), None).unwrap();
+        assert_eq!(trace.turns.len(), 1);
+        assert_eq!(trace.turns[0].request.source_request_id, "early");
     }
 }

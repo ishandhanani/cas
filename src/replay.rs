@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize};
 use crate::agent::AgentKind;
 use crate::scenario::{CompactionExpectedEffect, GeneratedCompactionAttempt};
 use crate::token_shape::TokenDictionaryManifest;
-use crate::trace::{AgentContext, TraceManifest, TraceStorageManifest};
+use crate::trace::{AgentContext, TraceManifest};
 
 mod artifacts;
 mod captured;
 mod generated;
 mod request;
 
-pub use captured::run_stored_replay;
+pub use captured::run_agentic_replay;
 pub use generated::run_generated_scenario;
 
 pub(crate) use artifacts::percentiles;
@@ -96,8 +96,6 @@ pub struct RunSummary {
     pub max_in_flight: usize,
     pub warmup_connections: usize,
     pub http_transport: HttpTransport,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prepare_lookahead_ms: Option<u64>,
     pub result_flush_interval: usize,
     pub max_dispatch_p99_ms: f64,
     pub max_dispatch_max_ms: f64,
@@ -105,12 +103,12 @@ pub struct RunSummary {
     pub static_header_names: Vec<String>,
     pub protocol_surface: &'static str,
     pub traffic_kind: TrafficKind,
+    pub scheduling_model: &'static str,
     pub token_path_verified: bool,
     pub engine_cache_mode: BTreeMap<String, String>,
     pub capacity_performance_conclusions_allowed: bool,
     pub conclusion_blockers: Vec<String>,
     pub source: TraceManifest,
-    pub source_storage: Option<TraceStorageManifest>,
     pub token_dictionary: TokenDictionaryManifest,
     pub request_count: usize,
     pub budgeted_requests: usize,
@@ -137,6 +135,15 @@ pub struct RunSummary {
 pub enum TrafficKind {
     SyntheticKvShape,
     CapturedTrace,
+}
+
+impl TrafficKind {
+    fn scheduling_model(self) -> &'static str {
+        match self {
+            Self::CapturedTrace => "agentic_causal",
+            Self::SyntheticKvShape => "generated_causal",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

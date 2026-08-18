@@ -8,9 +8,9 @@ Keep agent behavior separate from serving policy. Dynamo and the inference engin
 
 ## Traffic models
 
-Captured replay is open-loop. Recorded client send times determine request readiness. Slow responses do not move later send times, but concurrency and admission gates can delay dispatch.
+All traffic is agentic and causal. Captured replay uses Dynamo's lowering policy: independent roots retain recorded arrival offsets, while same-session turns, tool continuations, subagent launches, and joins wait for actual replay completions plus their recorded residual delays. Traces without `agent_context` are rejected.
 
-Generated traffic is closed-loop. A model response or sampled agent delay releases the next request. Target latency therefore changes the achieved request rate.
+Generated traffic is also causal. A model response or sampled agent delay releases the next request. Target latency therefore changes the achieved request rate in both modes.
 
 Captured requests and ordinary generated turns have positive input and output token counts. Compaction attempts can omit an output budget. A session completes with its last model response. Do not add lifecycle-control requests, zero-output close nodes, or final-request headers without a new design decision.
 
@@ -34,11 +34,11 @@ The generator does not support child roles, per-child profiles, child-to-child m
 
 | Path | Purpose |
 |---|---|
-| `src/trace.rs` | Trace v1 parsing and validation. |
-| `src/trace/storage.rs` | SQLite ordering, selection, and bounded reads. |
+| `src/trace.rs` | Trace v1 request/tool parsing and validation. |
+| `src/trace/agentic.rs` | Dynamo-derived session, subagent, tool, and timing lowering. |
 | `src/agent.rs` | Agent-specific context headers. |
 | `src/replay.rs` | Shared run and result contracts. |
-| `src/replay/captured.rs` | Open-loop captured-trace scheduling. |
+| `src/replay/captured.rs` | Completion-driven captured agent replay. |
 | `src/replay/generated.rs` | Closed-loop generated-graph scheduling. |
 | `src/replay/request.rs` | HTTP construction, execution, and SSE parsing. |
 | `src/replay/artifacts.rs` | Result writing, histograms, and run gates. |
@@ -81,12 +81,6 @@ for profile in profiles/*.toml; do
   profile_name="${profile##*/}"
   cargo run --quiet -- plan --config "$profile" --output "$plan_root/${profile_name%.toml}"
 done
-```
-
-The ignored 100,000-request stress test is useful after trace-storage or scheduler changes:
-
-```bash
-cargo test --all-targets trace::tests::stored_trace_handles_one_hundred_thousand_requests_in_batches -- --ignored --exact
 ```
 
 ## Git

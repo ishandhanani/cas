@@ -15,11 +15,11 @@ use crate::trace::{LoadedTrace, TraceRequest, load_trace};
 struct RequestMapping {
     source_request_id: String,
     replay_request_id: String,
+    dispatch_offset_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FidelityReport {
-    pub time_scale: f64,
     pub max_arrival_p99_ms: f64,
     pub max_arrival_max_ms: f64,
     pub source_request_count: usize,
@@ -43,7 +43,6 @@ pub struct FidelityReport {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CompareOptions {
-    pub time_scale: f64,
     pub max_arrival_p99_ms: f64,
     pub max_arrival_max_ms: f64,
 }
@@ -68,9 +67,6 @@ pub fn compare_traces(
 }
 
 fn validate_options(options: CompareOptions) -> Result<()> {
-    if !options.time_scale.is_finite() || options.time_scale <= 0.0 {
-        bail!("time_scale must be a positive finite number");
-    }
     if !options.max_arrival_p99_ms.is_finite() || options.max_arrival_p99_ms < 0.0 {
         bail!("max_arrival_p99_ms must be a non-negative finite number");
     }
@@ -113,16 +109,17 @@ fn compare_loaded(
     let source_by_id: HashMap<&str, &TraceRequest> = source
         .requests
         .iter()
-        .map(|request| (request.source_request_id.as_str(), request))
+        .map(|entry| (entry.request.source_request_id.as_str(), &entry.request))
         .collect();
     let replay_by_x_request_id: HashMap<&str, &TraceRequest> = replay
         .requests
         .iter()
-        .filter_map(|request| {
-            request
+        .filter_map(|entry| {
+            entry
+                .request
                 .source_x_request_id
                 .as_deref()
-                .map(|x_request_id| (x_request_id, request))
+                .map(|x_request_id| (x_request_id, &entry.request))
         })
         .collect();
     if replay_by_x_request_id.is_empty() {
@@ -151,9 +148,16 @@ fn compare_loaded(
             );
             continue;
         };
-        pairs.push((*source_request, *replay_request));
+        if !mapping.dispatch_offset_ms.is_finite() || mapping.dispatch_offset_ms < 0.0 {
+            bail!(
+                "request {} has invalid dispatch_offset_ms {}",
+                mapping.source_request_id,
+                mapping.dispatch_offset_ms
+            );
+        }
+        pairs.push((*source_request, *replay_request, mapping.dispatch_offset_ms));
     }
-    pairs.sort_by_key(|(source_request, _)| source_request.ordinal);
+    pairs.sort_by_key(|(source_request, _, _)| source_request.ordinal);
 
     let mut trace_block_size_matches = 0;
     let mut input_length_matches = 0;
@@ -162,7 +166,7 @@ fn compare_loaded(
     let mut compaction_metadata_matches = 0;
     let mut unverifiable_compaction_metadata = 0;
     let mut warnings = Vec::new();
-    for (source_request, replay_request) in &pairs {
+    for (source_request, replay_request, _) in &pairs {
         compare_field(
             &mut trace_block_size_matches,
             &mut mismatches,
@@ -236,7 +240,7 @@ fn compare_loaded(
             "canonical prefix topology does not match".to_string(),
         );
     }
-    let arrival_error_ms = arrival_error(&pairs, options.time_scale);
+    let arrival_error_ms = arrival_error(&pairs);
     let arrival_timing_matches = arrival_error_ms.absolute.p99 <= options.max_arrival_p99_ms
         && arrival_error_ms.absolute.max <= options.max_arrival_max_ms;
     if !arrival_timing_matches {
@@ -261,7 +265,6 @@ fn compare_loaded(
         && arrival_timing_matches;
 
     Ok(FidelityReport {
-        time_scale: options.time_scale,
         max_arrival_p99_ms: options.max_arrival_p99_ms,
         max_arrival_max_ms: options.max_arrival_max_ms,
         source_request_count: source.requests.len(),
@@ -322,14 +325,14 @@ fn compare_field<T: std::fmt::Display>(
 }
 
 fn canonical_prefix_sequences(
-    pairs: &[(&TraceRequest, &TraceRequest)],
+    pairs: &[(&TraceRequest, &TraceRequest, f64)],
     use_source: bool,
 ) -> Vec<Vec<u64>> {
     let mut labels = HashMap::new();
     let mut next_label = 0_u64;
     pairs
         .iter()
-        .map(|(source, replay)| {
+        .map(|(source, replay, _)| {
             let request = if use_source { *source } else { *replay };
             request
                 .input_sequence_hashes
@@ -346,20 +349,18 @@ fn canonical_prefix_sequences(
         .collect()
 }
 
-fn arrival_error(pairs: &[(&TraceRequest, &TraceRequest)], time_scale: f64) -> ArrivalError {
-    let Some((first_source, first_replay)) = pairs.first() else {
+fn arrival_error(pairs: &[(&TraceRequest, &TraceRequest, f64)]) -> ArrivalError {
+    let Some((_, first_replay, first_dispatch_ms)) = pairs.first() else {
         return ArrivalError {
             absolute: Percentiles::default(),
             mean_signed: 0.0,
         };
     };
     let mut signed = Vec::with_capacity(pairs.len());
-    for (source, replay) in pairs {
-        let source_offset =
-            source.request_received_ms as i128 - first_source.request_received_ms as i128;
-        let replay_offset =
-            replay.request_received_ms as i128 - first_replay.request_received_ms as i128;
-        signed.push(replay_offset as f64 - source_offset as f64 / time_scale);
+    let frontend_clock_anchor_ms = first_replay.request_received_ms as f64 - first_dispatch_ms;
+    for (_, replay, dispatch_offset_ms) in pairs {
+        let expected_arrival_ms = frontend_clock_anchor_ms + dispatch_offset_ms;
+        signed.push(replay.request_received_ms as f64 - expected_arrival_ms);
     }
     let mean_signed = signed.iter().sum::<f64>() / signed.len() as f64;
     let absolute = crate::replay::percentiles(signed.iter().map(|value| value.abs()).collect());
@@ -407,13 +408,12 @@ mod tests {
         let source_b = request("b", None, 120, &[11, 33]);
         let replay_a = request("ra", Some("x-a"), 1000, &[101, 202]);
         let replay_b = request("rb", Some("x-b"), 1020, &[101, 303]);
-        let pairs = vec![(&source_a, &replay_a), (&source_b, &replay_b)];
+        let pairs = vec![(&source_a, &replay_a, 10.0), (&source_b, &replay_b, 30.0)];
         assert_eq!(
             canonical_prefix_sequences(&pairs, true),
             canonical_prefix_sequences(&pairs, false)
         );
-        assert_eq!(arrival_error(&pairs, 1.0).absolute.max, 0.0);
-        assert_eq!(arrival_error(&pairs, 2.0).absolute.max, 10.0);
+        assert_eq!(arrival_error(&pairs).absolute.max, 0.0);
     }
 
     #[test]
