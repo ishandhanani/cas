@@ -84,6 +84,18 @@ Agent-loadgen makes those runtime outcomes controllable:
 
 Codex itself does not expose these probabilities. They should come from traces for fidelity runs. Direct overrides are valuable for tool-heavy, network-heavy, or failure-heavy stress tests.
 
+### Empirical preset calibration
+
+A 2026-08-18 analysis of 496 Claude Code sessions and real Codex sessions in [SWE-chat](https://huggingface.co/datasets/SALT-NLP/SWE-chat) found that tool batching is primarily a harness/model behavior rather than a coding-domain behavior:
+
+- Claude Code placed only 15 of 42,784 tool calls in parallel batches, about 0.04%.
+- Codex placed roughly 55–65% of tool calls in overlapping batches, with concurrent `exec_command` clusters accounting for much of that behavior.
+- Call-weighted parallelism was much larger than time-weighted parallelism. Codex's parallel tool-time share ranged from single digits to roughly 27% across samples and counting rules.
+
+The built-in presets now preserve their previous total tool-phase probability while changing the serial/parallel split. Claude Code uses `tool_probability = 0.62` and `parallel_tool_probability = 0.0`. Codex uses `0.39` and `0.19`; with the default uniform parallel count of two to four calls, the expected parallel-call share is about 59%. OpenCode retains its earlier `0.48` and `0.08` split because this study did not provide an OpenCode calibration.
+
+These defaults are evidence-based starting points, not universal constants. The reported Codex result is sensitive to tool-class inclusion, especially shell execution, and model choice. Fit both action probabilities and tool-class weights from the target workload. Use `scenario.json.tool_parallelism` to check the sampled call-weighted and time-weighted results instead of inferring either from the TOML probabilities.
+
 ## Reasoning
 
 Reasoning is not the same as `trajectory.think_time_ms`. For supported models, Codex requests encrypted reasoning content and a reasoning summary. It persists the opaque reasoning item for later requests while omitting raw reasoning text.

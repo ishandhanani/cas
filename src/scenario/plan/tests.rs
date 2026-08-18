@@ -204,3 +204,33 @@ fn closed_loop_slot_restarts_after_its_previous_root_completes() {
             .all(|session| session.root_agent_slot == 0)
     );
 }
+
+#[test]
+fn reports_call_and_time_weighted_tool_parallelism() {
+    let mut config = config(AgentKind::Codex);
+    config.root_sessions = 1;
+    config.concurrent_agents = 1;
+    config.turns = UIntDistribution::fixed(2);
+    config.tool_probability = 0.0;
+    config.parallel_tool_probability = 1.0;
+    config.subagent_probability = 0.0;
+    config.swarm_probability = 0.0;
+    config.completion_probability = 0.0;
+    config.compaction_enabled = false;
+    config.parallel_count = UIntDistribution::fixed(3);
+    for class in &mut config.tool_classes {
+        class.latency_ms = UIntDistribution::fixed(10);
+    }
+
+    let scenario = GeneratedScenario::generate(config).unwrap();
+    assert_eq!(scenario.tool_parallelism.tool_phases, 1);
+    assert_eq!(scenario.tool_parallelism.parallel_tool_phases, 1);
+    assert_eq!(scenario.tool_parallelism.tool_calls, 3);
+    assert_eq!(scenario.tool_parallelism.parallel_tool_calls, 3);
+    assert_eq!(scenario.tool_parallelism.parallel_call_fraction, 1.0);
+    assert_eq!(scenario.tool_parallelism.tool_work_ms, 30);
+    assert_eq!(scenario.tool_parallelism.tool_wall_ms, 10);
+    assert_eq!(scenario.tool_parallelism.parallel_wall_ms, 10);
+    assert_eq!(scenario.tool_parallelism.parallel_wall_time_fraction, 1.0);
+    assert_eq!(scenario.tool_parallelism.work_to_wall_ratio, 3.0);
+}

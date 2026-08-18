@@ -46,6 +46,7 @@ The generator does not support child roles, per-child profiles, child-to-child m
 | `src/scenario/distribution.rs` | Deterministic distribution sampling. |
 | `src/scenario/model.rs` | Serialized generated-scenario types. |
 | `src/scenario/plan.rs` | Generated agent graph planning. |
+| `src/scenario/tool_parallelism.rs` | Call- and time-weighted generated tool statistics. |
 | `src/token_shape.rs` | Safe dummy-token synthesis. |
 | `src/compare.rs` | Structural trace comparison. |
 | `profiles/` | Small example profiles for supported agents. |

@@ -314,12 +314,19 @@ fn replace<T>(target: &mut T, value: Option<T>) {
 
 impl ResolvedGeneratorConfig {
     pub(super) fn preset(agent: AgentKind, seed: u64) -> Self {
-        let (system_prefix_tokens, tool_catalog_tokens, tool_probability, subagent_probability) =
-            match agent {
-                AgentKind::ClaudeCode => (12_000, 14_000, 0.54, 0.10),
-                AgentKind::Codex => (11_000, 9_000, 0.50, 0.08),
-                AgentKind::Opencode => (7_000, 11_000, 0.48, 0.10),
-            };
+        let (
+            system_prefix_tokens,
+            tool_catalog_tokens,
+            tool_probability,
+            parallel_tool_probability,
+            subagent_probability,
+        ) = match agent {
+            // Preserve the total tool-phase probability while reflecting the
+            // observed harness-specific batching behavior.
+            AgentKind::ClaudeCode => (12_000, 14_000, 0.62, 0.0, 0.10),
+            AgentKind::Codex => (11_000, 9_000, 0.39, 0.19, 0.08),
+            AgentKind::Opencode => (7_000, 11_000, 0.48, 0.08, 0.10),
+        };
         Self {
             agent,
             seed,
@@ -340,7 +347,7 @@ impl ResolvedGeneratorConfig {
             tool_result_tokens: UIntDistribution::log_normal(700.0, 1.1, 16, 16_384),
             context_window_tokens: 128_000,
             tool_probability,
-            parallel_tool_probability: 0.08,
+            parallel_tool_probability,
             subagent_probability,
             swarm_probability: 0.025,
             completion_probability: 0.10,
@@ -565,5 +572,35 @@ mod tests {
             "#,
         );
         assert!(config.is_err());
+    }
+
+    #[test]
+    fn presets_use_agent_specific_tool_batching() {
+        let claude = ResolvedGeneratorConfig::preset(AgentKind::ClaudeCode, 0);
+        let codex = ResolvedGeneratorConfig::preset(AgentKind::Codex, 0);
+        let opencode = ResolvedGeneratorConfig::preset(AgentKind::Opencode, 0);
+
+        assert_eq!(claude.parallel_tool_probability, 0.0);
+        assert_eq!(codex.parallel_tool_probability, 0.19);
+        assert_eq!(opencode.parallel_tool_probability, 0.08);
+
+        // The calibration redistributes existing tool phases instead of
+        // changing the overall tool-phase rate.
+        for (actual, expected) in [
+            (
+                claude.tool_probability + claude.parallel_tool_probability,
+                0.62,
+            ),
+            (
+                codex.tool_probability + codex.parallel_tool_probability,
+                0.58,
+            ),
+            (
+                opencode.tool_probability + opencode.parallel_tool_probability,
+                0.56,
+            ),
+        ] {
+            assert!((actual - expected).abs() < f64::EPSILON);
+        }
     }
 }

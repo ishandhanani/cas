@@ -71,6 +71,8 @@ Generation has a planning phase and an execution phase.
 
 The complete graph is written to `scenario.json`. Runtime model text never changes the plan.
 
+The artifact also reports realized tool parallelism in two forms: the fraction of calls belonging to multi-call phases and the fraction of synthetic tool wall time with concurrent calls. This keeps high call batching from being mistaken for equally high time parallelism.
+
 ### Execution
 
 ```text

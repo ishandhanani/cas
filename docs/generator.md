@@ -80,6 +80,8 @@ The configured token sizes are rounded up to complete KV blocks. This keeps pref
 
 The first five probabilities must sum to at most 1.0. Remaining probability becomes a text/user turn. The last configured turn is always a completion so every non-truncated session terminates.
 
+These are probabilities per model turn, not fractions of tool calls. A parallel phase contributes every sampled call in `tools.parallel_count`. For example, a serial probability of `0.39`, a parallel probability of `0.19`, and an average parallel count of three produce about 59% of tool calls in parallel phases even though only 19% of model turns select that action.
+
 ## Tool classes
 
 `tools.classes` replaces the preset list. Weights are relative and do not need to sum to one. Each selected class samples latency and result size, then independently samples `error_probability`. `tools.retry_probability` controls whether a failed call adds one more latency and result sample. `tools.parallel_count` controls tool fanout for a parallel action.
@@ -96,6 +98,18 @@ latency_ms = { kind = "log_normal", median = 600.0, sigma = 1.0, min = 100, max 
 result_tokens = { kind = "log_normal", median = 1200.0, sigma = 1.1, min = 64, max = 8000 }
 error_probability = 0.08
 ```
+
+## Parallelism validation
+
+`scenario.json` records `tool_parallelism` from the realized samples:
+
+- `parallel_call_fraction`: fraction of tool calls that belong to a multi-call phase.
+- `parallel_wall_time_fraction`: fraction of synthetic tool-phase wall time with at least two calls active.
+- `tool_work_ms`: sum of every individual tool duration.
+- `tool_wall_ms`: sum of each phase's critical-path duration.
+- `work_to_wall_ratio`: tool work divided by tool wall time.
+
+Generated calls in a parallel phase start together. Its wall time is the longest call, and its interval with at least two active calls is the second-longest call. These metrics describe harness-internal batching; they do not count incidental overlap between independent root agents or subagents.
 
 ## Compaction
 

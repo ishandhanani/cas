@@ -131,6 +131,7 @@ async fn main() -> Result<()> {
                 "profile_digest_sha256": scenario.profile_digest_sha256,
                 "requests": scenario.nodes.len(),
                 "sessions": scenario.sessions.len(),
+                "tool_parallelism": scenario.tool_parallelism,
                 "trace_manifest": scenario.trace_manifest,
                 "scenario_path": scenario_path,
             });

@@ -12,6 +12,7 @@ use super::model::{
     CompactionExpectedEffect, GeneratedCompactionAttempt, GeneratedCompactionOperation,
     GeneratedNode, GeneratedScenario, GeneratedSession, GeneratedToolEvent,
 };
+use super::tool_parallelism::summarize_tool_parallelism;
 use crate::trace::{AgentContext, TraceManifest, TraceRequest};
 
 impl GeneratedScenario {
@@ -148,10 +149,12 @@ impl Planner {
         let profile_bytes = serde_json::to_vec(&self.config)?;
         let profile_digest_sha256 = hex::encode(Sha256::digest(&profile_bytes));
         let trace_manifest = self.trace_manifest(profile_digest_sha256.clone())?;
+        let tool_parallelism = summarize_tool_parallelism(&self.nodes)?;
         let scenario_bytes = serde_json::to_vec(&(
             &profile_digest_sha256,
             &self.sessions,
             &self.nodes,
+            &tool_parallelism,
             &self.compaction_operations,
             &trace_manifest,
         ))?;
@@ -163,6 +166,7 @@ impl Planner {
             config: self.config,
             sessions: self.sessions,
             nodes: self.nodes,
+            tool_parallelism,
             compaction_operations: self.compaction_operations,
             trace_manifest,
         })
