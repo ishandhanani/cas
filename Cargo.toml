@@ -6,7 +6,7 @@ rust-version = "1.85"
 license = "Apache-2.0"
 description = "KV-faithful trace replay and generated coding-agent load for Dynamo"
 readme = "README.md"
-repository = "https://github.com/ishandhanani/cas"
+repository = "https://github.com/NVIDIA-dev/agent-loadgen"
 publish = false
 
 [dependencies]
@@ -27,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
-tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokenizers = { version = "0.21.4", default-features = false, features = ["esaxx_fast", "onig", "rustls-tls"] }
 toml = "0.9"
 uuid = { version = "1", features = ["v4"] }

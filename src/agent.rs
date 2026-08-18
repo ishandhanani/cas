@@ -52,9 +52,6 @@ pub(crate) fn agent_headers(
             values
         }
     });
-    if let Some(finality) = context.session_final {
-        headers.push(("x-dynamo-session-final", finality.to_string()));
-    }
     if let (AgentKind::Codex, Some(compaction)) = (kind, context.compaction.as_ref()) {
         headers.push((
             "x-codex-turn-metadata",
@@ -70,7 +67,6 @@ pub(crate) fn is_managed_header(name: &str) -> bool {
         "x-request-id"
             | "x-dynamo-session-id"
             | "x-dynamo-parent-session-id"
-            | "x-dynamo-session-final"
             | "x-claude-code-session-id"
             | "x-claude-code-agent-id"
             | "x-claude-code-parent-agent-id"
@@ -91,7 +87,6 @@ mod tests {
         let context = AgentContext {
             session_id: "child".to_string(),
             parent_session_id: Some("parent".to_string()),
-            session_final: Some(true),
             compaction: None,
             input_trigger: None,
         };
@@ -101,8 +96,7 @@ mod tests {
                 ("x-dynamo-session-id", "child".to_string()),
                 ("x-dynamo-parent-session-id", "parent".to_string()),
                 ("thread-id", "child".to_string()),
-                ("x-codex-parent-thread-id", "parent".to_string()),
-                ("x-dynamo-session-final", "true".to_string())
+                ("x-codex-parent-thread-id", "parent".to_string())
             ]
         );
     }
@@ -112,7 +106,6 @@ mod tests {
         let context = AgentContext {
             session_id: "child".to_string(),
             parent_session_id: Some("parent".to_string()),
-            session_final: None,
             compaction: None,
             input_trigger: None,
         };
@@ -133,7 +126,6 @@ mod tests {
         let context = AgentContext {
             session_id: "child".to_string(),
             parent_session_id: Some("parent".to_string()),
-            session_final: None,
             compaction: None,
             input_trigger: None,
         };

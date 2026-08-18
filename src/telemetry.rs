@@ -165,7 +165,6 @@ fn validate_record(record: &EngineTelemetryRecord, path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::replay::RequestResult;
-    use crate::scenario::GeneratedNodeKind;
     use tempfile::tempdir;
 
     fn request() -> RequestResult {
@@ -183,11 +182,9 @@ mod tests {
             dispatch_lag_ms: 0.0,
             local_admission_lag_ms: 0.0,
             expected_input_tokens: 16,
-            request_kind: GeneratedNodeKind::ModelTurn,
             expected_output_tokens: Some(2),
             observed_output_tokens: Some(2),
             output_length_match: Some(true),
-            control_only_match: None,
             compaction_operation_id: None,
             compaction_phase: None,
             compaction_attempt: None,

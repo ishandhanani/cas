@@ -5,90 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::config::{GENERATOR_SCHEMA_VERSION, ResolvedGeneratorConfig, ToolClass};
+use super::model::{
+    CompactionExpectedEffect, GeneratedCompactionAttempt, GeneratedCompactionOperation,
+    GeneratedNode, GeneratedScenario, GeneratedSession, GeneratedToolEvent,
+};
 use crate::trace::{AgentContext, TraceManifest, TraceRequest};
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GeneratedScenario {
-    pub schema_version: u32,
-    pub profile_digest_sha256: String,
-    pub scenario_digest_sha256: String,
-    pub config: ResolvedGeneratorConfig,
-    pub sessions: Vec<GeneratedSession>,
-    pub nodes: Vec<GeneratedNode>,
-    pub compaction_operations: Vec<GeneratedCompactionOperation>,
-    pub trace_manifest: TraceManifest,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GeneratedSession {
-    pub session_id: String,
-    pub parent_session_id: Option<String>,
-    pub depth: usize,
-    pub root_agent_slot: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GeneratedNode {
-    pub node_id: String,
-    pub kind: GeneratedNodeKind,
-    pub action: String,
-    pub dependencies: Vec<usize>,
-    pub delay_after_dependencies_ms: u64,
-    pub root_arrival_ms: Option<u64>,
-    pub window_epoch: usize,
-    pub tool_events: Vec<GeneratedToolEvent>,
-    pub spawned_session_ids: Vec<String>,
-    pub output_budget_tokens: Option<u32>,
-    pub compaction_attempt: Option<GeneratedCompactionAttempt>,
-    pub request: TraceRequest,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GeneratedNodeKind {
-    ModelTurn,
-    SessionClose,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactionExpectedEffect {
-    NoMutationAborted,
-    ApplyOnce,
-    DuplicateNoop,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GeneratedCompactionAttempt {
-    pub operation_id: String,
-    pub phase: String,
-    pub attempt: usize,
-    pub expected_effect: CompactionExpectedEffect,
-    pub abort_after_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GeneratedCompactionOperation {
-    pub operation_id: String,
-    pub session_id: String,
-    pub phase: String,
-    pub attempts: Vec<usize>,
-    pub applied_attempt: usize,
-    pub expected_apply_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GeneratedToolEvent {
-    pub class: String,
-    pub latency_ms: u64,
-    pub result_tokens: u64,
-    pub failed: bool,
-    pub retried: bool,
-}
 
 impl GeneratedScenario {
     pub fn generate(config: ResolvedGeneratorConfig) -> Result<Self> {
@@ -106,7 +30,6 @@ struct Planner {
     labels: BTreeMap<String, u64>,
     label_owners: BTreeMap<u64, String>,
     total_input_tokens: u64,
-    pending_session_closes: usize,
 }
 
 struct SessionState {
@@ -133,7 +56,6 @@ struct NodeSpec<'a> {
     root_arrival_ms: Option<u64>,
     action: &'a str,
     input_trigger: &'a str,
-    kind: GeneratedNodeKind,
     logical_output_tokens: u64,
     output_budget_tokens: Option<u64>,
     compaction: Option<serde_json::Value>,
@@ -177,7 +99,6 @@ impl Planner {
             labels: BTreeMap::new(),
             label_owners: BTreeMap::new(),
             total_input_tokens: 0,
-            pending_session_closes: 0,
         };
         let system_tokens = planner
             .config
@@ -258,12 +179,7 @@ impl Planner {
             root_agent_slot,
         } = launch;
         if self.sessions.len() >= self.config.max_sessions
-            || self
-                .nodes
-                .len()
-                .saturating_add(self.pending_session_closes)
-                .saturating_add(2)
-                > self.config.max_nodes
+            || self.nodes.len().saturating_add(1) > self.config.max_nodes
         {
             return Ok(None);
         }
@@ -278,7 +194,6 @@ impl Planner {
             depth,
             root_agent_slot,
         });
-        self.pending_session_closes += 1;
         let repository_tokens = self.config.repository_tokens.sample(&mut self.rng)?;
         let session_tokens = self.config.session_tokens.sample(&mut self.rng)?;
         let mut blocks = self.shared_prefix.clone();
@@ -313,8 +228,7 @@ impl Planner {
         let mut final_node = None;
 
         for turn in 0..turns {
-            if self.nodes.len().saturating_add(self.pending_session_closes) >= self.config.max_nodes
-            {
+            if self.nodes.len() >= self.config.max_nodes {
                 break;
             }
             if self.compaction_due(&state) {
@@ -361,7 +275,6 @@ impl Planner {
                     root_arrival_ms: root_arrival_ms.filter(|_| final_node.is_none()),
                     action: action.name(),
                     input_trigger: next_trigger,
-                    kind: GeneratedNodeKind::ModelTurn,
                     logical_output_tokens: output_tokens,
                     output_budget_tokens: Some(output_tokens),
                     compaction: None,
@@ -477,24 +390,9 @@ impl Planner {
                 }
             }
         }
-        let final_model_node = final_node.context("generated session has no model turn")?;
-        let close = self.push_request(
-            &state,
-            NodeSpec {
-                dependencies: vec![final_model_node],
-                delay_after_dependencies_ms: 0,
-                root_arrival_ms: None,
-                action: "session_close",
-                input_trigger: "other",
-                kind: GeneratedNodeKind::SessionClose,
-                logical_output_tokens: 0,
-                output_budget_tokens: None,
-                compaction: None,
-                compaction_attempt: None,
-            },
-        )?;
-        self.pending_session_closes = self.pending_session_closes.saturating_sub(1);
-        Ok(Some(close))
+        Ok(Some(
+            final_node.context("generated session has no model turn")?,
+        ))
     }
 
     fn sample_action(&mut self, depth: usize, allow_completion: bool) -> NextAction {
@@ -570,10 +468,7 @@ impl Planner {
             "compaction-{:016x}-{}-{}-{turn}",
             self.config.seed, state.session_id, state.window_epoch
         );
-        let available_attempts = self
-            .config
-            .max_nodes
-            .saturating_sub(self.nodes.len().saturating_add(self.pending_session_closes));
+        let available_attempts = self.config.max_nodes.saturating_sub(self.nodes.len());
         let max_attempts = self.config.compaction_max_attempts.min(available_attempts);
         if max_attempts == 0 {
             bail!("generated scenario has no room for a compaction attempt");
@@ -635,7 +530,6 @@ impl Planner {
                     root_arrival_ms: if index == 0 { root_arrival_ms } else { None },
                     action: "compaction_attempt",
                     input_trigger: "other",
-                    kind: GeneratedNodeKind::ModelTurn,
                     logical_output_tokens: if expected_effect == CompactionExpectedEffect::ApplyOnce
                     {
                         summary_tokens
@@ -685,13 +579,7 @@ impl Planner {
     }
 
     fn push_request(&mut self, state: &SessionState, spec: NodeSpec<'_>) -> Result<usize> {
-        let nodes_with_reserved_closes =
-            self.nodes.len().saturating_add(self.pending_session_closes);
-        let no_room = match spec.kind {
-            GeneratedNodeKind::ModelTurn => nodes_with_reserved_closes >= self.config.max_nodes,
-            GeneratedNodeKind::SessionClose => self.nodes.len() >= self.config.max_nodes,
-        };
-        if no_room {
+        if self.nodes.len() >= self.config.max_nodes {
             bail!("generated scenario reached max_nodes");
         }
         if spec.dependencies.is_empty() != spec.root_arrival_ms.is_some() {
@@ -704,17 +592,12 @@ impl Planner {
         {
             bail!("generated request has a forward or missing dependency");
         }
-        let (input_tokens, input_sequence_hashes) = match spec.kind {
-            GeneratedNodeKind::ModelTurn => (
-                state
-                    .blocks
-                    .len()
-                    .checked_mul(self.config.block_size)
-                    .context("generated input length overflow")?,
-                state.blocks.clone(),
-            ),
-            GeneratedNodeKind::SessionClose => (0, Vec::new()),
-        };
+        let input_tokens = state
+            .blocks
+            .len()
+            .checked_mul(self.config.block_size)
+            .context("generated input length overflow")?;
+        let input_sequence_hashes = state.blocks.clone();
         self.total_input_tokens = self
             .total_input_tokens
             .checked_add(input_tokens as u64)
@@ -732,18 +615,8 @@ impl Planner {
             .map(u32::try_from)
             .transpose()
             .context("generated output budget does not fit u32")?;
-        match spec.kind {
-            GeneratedNodeKind::ModelTurn
-                if output_tokens == 0 && spec.compaction_attempt.is_none() =>
-            {
-                bail!("generated model turn output must be greater than zero");
-            }
-            GeneratedNodeKind::SessionClose
-                if output_tokens != 0 || output_budget_tokens.is_some() =>
-            {
-                bail!("generated session close must have no model output budget");
-            }
-            _ => {}
+        if output_tokens == 0 && spec.compaction_attempt.is_none() {
+            bail!("generated request output must be greater than zero");
         }
         let ordinal = self.nodes.len();
         let node_id = format!("node-{ordinal}");
@@ -760,14 +633,12 @@ impl Planner {
             agent_context: Some(AgentContext {
                 session_id: state.session_id.clone(),
                 parent_session_id: state.parent_session_id.clone(),
-                session_final: Some(spec.kind == GeneratedNodeKind::SessionClose),
                 compaction: spec.compaction,
                 input_trigger: Some(spec.input_trigger.to_string()),
             }),
         };
         self.nodes.push(GeneratedNode {
             node_id,
-            kind: spec.kind,
             action: spec.action.to_string(),
             dependencies: spec.dependencies,
             delay_after_dependencies_ms: spec.delay_after_dependencies_ms,
@@ -836,11 +707,6 @@ impl Planner {
                 .checked_add(node.request.output_tokens as u64)
                 .context("generated output token total overflow")
         })?;
-        let zero_output_requests = self
-            .nodes
-            .iter()
-            .filter(|node| node.request.output_tokens == 0)
-            .count();
         let last_root_arrival = self
             .nodes
             .iter()
@@ -849,7 +715,6 @@ impl Planner {
             .unwrap_or(0);
         Ok(TraceManifest {
             request_count: self.nodes.len(),
-            zero_output_requests,
             session_count: self.sessions.len(),
             requests_with_agent_context: self.nodes.len(),
             first_request_received_ms: 0,

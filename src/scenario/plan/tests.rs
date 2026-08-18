@@ -189,25 +189,14 @@ fn closed_loop_slot_restarts_after_its_previous_root_completes() {
     config.restart_delay_ms = UIntDistribution::fixed(17);
 
     let scenario = GeneratedScenario::generate(config).unwrap();
-    assert_eq!(scenario.nodes.len(), 6);
+    assert_eq!(scenario.nodes.len(), 3);
     assert_eq!(scenario.nodes[0].root_arrival_ms, Some(0));
     assert!(scenario.nodes[0].dependencies.is_empty());
     assert_eq!(scenario.nodes[1].root_arrival_ms, None);
     assert_eq!(scenario.nodes[1].dependencies, vec![0]);
+    assert_eq!(scenario.nodes[1].delay_after_dependencies_ms, 17);
     assert_eq!(scenario.nodes[2].dependencies, vec![1]);
     assert_eq!(scenario.nodes[2].delay_after_dependencies_ms, 17);
-    assert_eq!(scenario.nodes[3].dependencies, vec![2]);
-    assert_eq!(scenario.nodes[4].dependencies, vec![3]);
-    assert_eq!(scenario.nodes[4].delay_after_dependencies_ms, 17);
-    assert_eq!(scenario.nodes[5].dependencies, vec![4]);
-    assert!(scenario.nodes.iter().enumerate().all(|(ordinal, node)| {
-        let expected = ordinal % 2 == 1;
-        node.request
-            .agent_context
-            .as_ref()
-            .and_then(|context| context.session_final)
-            == Some(expected)
-    }));
     assert!(
         scenario
             .sessions

@@ -15,7 +15,6 @@ use super::{
     RequestExecution, RequestResult, millis,
 };
 use crate::agent::{agent_headers, is_managed_header};
-use crate::scenario::GeneratedNodeKind;
 use crate::token_shape::TokenDictionary;
 use crate::trace::TraceRequest;
 
@@ -50,10 +49,8 @@ pub(super) fn prepare_request(
         "stream_options": {"include_usage": true},
         "temperature": 0.0
     });
-    if execution.kind == GeneratedNodeKind::ModelTurn {
-        let tokens = dictionary.synthesize(&request)?;
-        body["nvext"] = json!({"token_data": tokens});
-    }
+    let tokens = dictionary.synthesize(&request)?;
+    body["nvext"] = json!({"token_data": tokens});
     if let Some(output_budget_tokens) = execution.output_budget_tokens {
         body["max_tokens"] = json!(output_budget_tokens);
         body["ignore_eos"] = json!(true);
@@ -79,7 +76,6 @@ pub(super) fn prepare_request(
         replay_request_id,
         agent_context: request.agent_context,
         input_tokens: request.input_tokens,
-        request_kind: execution.kind,
         expected_output_tokens: execution.output_budget_tokens,
         compaction_attempt: execution.compaction_attempt,
     };
@@ -152,12 +148,6 @@ pub(super) fn validate_options(options: &ReplayOptions) -> Result<()> {
     }
     if options.warmup_connections > options.max_in_flight {
         bail!("warmup_connections must not exceed max_in_flight");
-    }
-    if options
-        .prepare_lookahead
-        .is_some_and(|duration| duration.is_zero())
-    {
-        bail!("prepare_lookahead must be greater than zero");
     }
     if options.result_flush_interval == 0 {
         bail!("result_flush_interval must be greater than zero");
@@ -272,7 +262,6 @@ async fn perform_request(
     mut result: RequestResult,
 ) -> Result<RequestResult> {
     let expected_output_tokens = prepared.metadata.expected_output_tokens;
-    let request_kind = prepared.metadata.request_kind;
     let response = context.client.execute(prepared.http_request).await;
     let response = match response {
         Ok(response) => response,
@@ -301,17 +290,8 @@ async fn perform_request(
         Ok(stream) => {
             result.ttft_ms = stream.ttft_ms;
             result.observed_output_tokens = stream.output_tokens;
-            match request_kind {
-                GeneratedNodeKind::ModelTurn => {
-                    result.output_length_match = expected_output_tokens.and_then(|expected| {
-                        stream.output_tokens.map(|tokens| tokens == expected as u64)
-                    });
-                }
-                GeneratedNodeKind::SessionClose => {
-                    result.control_only_match =
-                        Some(stream.ttft_ms.is_none() && stream.output_tokens.unwrap_or(0) == 0);
-                }
-            }
+            result.output_length_match = expected_output_tokens
+                .and_then(|expected| stream.output_tokens.map(|tokens| tokens == expected as u64));
         }
         Err(error) => result.error = Some(error.to_string()),
     }
@@ -379,11 +359,9 @@ fn request_result_shell(
         dispatch_lag_ms,
         local_admission_lag_ms,
         expected_input_tokens: prepared.metadata.input_tokens,
-        request_kind: prepared.metadata.request_kind,
         expected_output_tokens: prepared.metadata.expected_output_tokens,
         observed_output_tokens: None,
         output_length_match: None,
-        control_only_match: None,
         compaction_operation_id: prepared
             .metadata
             .compaction_attempt

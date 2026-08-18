@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use super::{Percentiles, ReplayOptions, RequestResult, RunSummary, TrafficKind, millis};
 use crate::clock::TIMER_BACKEND;
-use crate::scenario::{CompactionExpectedEffect, GeneratedNodeKind};
+use crate::scenario::CompactionExpectedEffect;
 use crate::token_shape::TokenDictionaryManifest;
 use crate::trace::{TraceManifest, TraceStorageManifest};
 
@@ -61,16 +61,12 @@ impl ResultSink {
 pub(super) struct RunAccumulator {
     pub(super) request_count: usize,
     succeeded: usize,
-    model_turns: usize,
-    session_closes: usize,
-    budgeted_model_turns: usize,
-    unbudgeted_model_turns: usize,
+    budgeted_requests: usize,
+    unbudgeted_requests: usize,
     planned_aborts: usize,
     output_length_matches: usize,
     output_length_mismatches: usize,
     missing_output_usage: usize,
-    control_only_matches: usize,
-    control_only_mismatches: usize,
     planned_abort_matches: usize,
     planned_abort_mismatches: usize,
     scheduler_wake_lag_us: Histogram<u64>,
@@ -86,16 +82,12 @@ impl RunAccumulator {
         Ok(Self {
             request_count: 0,
             succeeded: 0,
-            model_turns: 0,
-            session_closes: 0,
-            budgeted_model_turns: 0,
-            unbudgeted_model_turns: 0,
+            budgeted_requests: 0,
+            unbudgeted_requests: 0,
             planned_aborts: 0,
             output_length_matches: 0,
             output_length_mismatches: 0,
             missing_output_usage: 0,
-            control_only_matches: 0,
-            control_only_mismatches: 0,
             planned_abort_matches: 0,
             planned_abort_mismatches: 0,
             scheduler_wake_lag_us: Histogram::new(3)?,
@@ -115,27 +107,15 @@ impl RunAccumulator {
         {
             self.succeeded += 1;
         }
-        match result.request_kind {
-            GeneratedNodeKind::ModelTurn => {
-                self.model_turns += 1;
-                if result.expected_output_tokens.is_some() {
-                    self.budgeted_model_turns += 1;
-                    match result.output_length_match {
-                        Some(true) => self.output_length_matches += 1,
-                        Some(false) => self.output_length_mismatches += 1,
-                        None => self.missing_output_usage += 1,
-                    }
-                } else {
-                    self.unbudgeted_model_turns += 1;
-                }
+        if result.expected_output_tokens.is_some() {
+            self.budgeted_requests += 1;
+            match result.output_length_match {
+                Some(true) => self.output_length_matches += 1,
+                Some(false) => self.output_length_mismatches += 1,
+                None => self.missing_output_usage += 1,
             }
-            GeneratedNodeKind::SessionClose => {
-                self.session_closes += 1;
-                match result.control_only_match {
-                    Some(true) => self.control_only_matches += 1,
-                    Some(false) | None => self.control_only_mismatches += 1,
-                }
-            }
+        } else {
+            self.unbudgeted_requests += 1;
         }
         if result.compaction_expected_effect == Some(CompactionExpectedEffect::NoMutationAborted) {
             self.planned_aborts += 1;
@@ -191,6 +171,7 @@ pub(super) struct SummaryIdentity<'a> {
     pub(super) run_id: String,
     pub(super) target: &'a str,
     pub(super) source_storage: Option<TraceStorageManifest>,
+    pub(super) prepare_lookahead: Option<Duration>,
 }
 
 pub(super) fn summarize(
@@ -209,9 +190,8 @@ pub(super) fn summarize(
     let local_admission_lag_ms = histogram_percentiles(&accumulator.local_admission_lag_us);
     let request_fidelity_matches = accumulator.request_count == source.request_count
         && accumulator.succeeded == source.request_count
-        && accumulator.output_length_matches == accumulator.budgeted_model_turns
+        && accumulator.output_length_matches == accumulator.budgeted_requests
         && accumulator.missing_output_usage == 0
-        && accumulator.control_only_matches == accumulator.session_closes
         && accumulator.planned_abort_matches == accumulator.planned_aborts;
     let dispatch_timing_matches = dispatch_timing_matches(accumulator, options.max_dispatch_max_ms);
     let passed = request_fidelity_matches && dispatch_timing_matches;
@@ -231,7 +211,7 @@ pub(super) fn summarize(
         max_in_flight: options.max_in_flight,
         warmup_connections: options.warmup_connections,
         http_transport: options.http_transport,
-        prepare_lookahead_ms: options
+        prepare_lookahead_ms: identity
             .prepare_lookahead
             .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64),
         result_flush_interval: options.result_flush_interval,
@@ -253,18 +233,14 @@ pub(super) fn summarize(
         source_storage: identity.source_storage,
         token_dictionary: dictionary.clone(),
         request_count: accumulator.request_count,
-        model_turns: accumulator.model_turns,
-        session_closes: accumulator.session_closes,
-        budgeted_model_turns: accumulator.budgeted_model_turns,
-        unbudgeted_model_turns: accumulator.unbudgeted_model_turns,
+        budgeted_requests: accumulator.budgeted_requests,
+        unbudgeted_requests: accumulator.unbudgeted_requests,
         planned_aborts: accumulator.planned_aborts,
         succeeded: accumulator.succeeded,
         failed: accumulator.request_count - accumulator.succeeded,
         output_length_matches: accumulator.output_length_matches,
         output_length_mismatches: accumulator.output_length_mismatches,
         missing_output_usage: accumulator.missing_output_usage,
-        control_only_matches: accumulator.control_only_matches,
-        control_only_mismatches: accumulator.control_only_mismatches,
         planned_abort_matches: accumulator.planned_abort_matches,
         planned_abort_mismatches: accumulator.planned_abort_mismatches,
         scheduler_wake_lag_ms,

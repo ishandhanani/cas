@@ -2,7 +2,7 @@
 
 Generator profiles are strict, versioned TOML. Unknown fields and unsupported schema versions fail during planning. `scenario.json` contains the fully resolved configuration, so a run does not depend on hidden defaults after planning.
 
-Schema version 3 removes `behavior.background_request_probability`. Independent work must use subagents so it has its own session lineage and cannot race the parent session close.
+Schema version 3 removes `behavior.background_request_probability`. Independent work uses subagents with separate session lineage and explicit dependencies.
 
 ## Execution model
 
@@ -14,10 +14,10 @@ active-agent slot -> root task -> model request
                                   +--parallel tools-max latency-----> next request
                                   +--subagent------child completion-> parent join
                                   +--swarm---------all children-----> parent join
-                                  +--complete model turn--> session close --> next root task in slot
+                                  +--complete response--restart delay------> next root task in slot
 ```
 
-Generated traffic is closed-loop. The first task in each active-agent slot starts during the configured ramp-up. Every later request becomes ready only after all graph dependencies complete, plus its sampled virtual delay. The final model turn has a positive output budget and `session_final = false`. Its dependent `SessionClose` node has zero logical output, no model token payload, no output budget, and `session_final = true`. When a root task closes, that slot releases its next root task after `restart_delay_ms`. Target response latency therefore controls the generated request rate. The scheduler can still run independent slots and sibling subagents concurrently. A blocking child or swarm joins the parent; a non-blocking child continues in its own child session.
+Generated traffic is closed-loop. The first task in each active-agent slot starts during the configured ramp-up. Every later request becomes ready only after all graph dependencies complete, plus its sampled virtual delay. The final model response completes the task. The slot starts its next root task after `restart_delay_ms`. Target response latency therefore controls the generated request rate. The scheduler can still run independent slots and sibling subagents concurrently. A blocking child or swarm joins the parent. A non-blocking child continues in its own session while the parent continues.
 
 The generator does not execute tools or generate meaningful text. Tool classes sample delay, result-token geometry, failure, and retry behavior. Those sampled outcomes and direct child-session IDs are recorded on their originating node in `scenario.json`.
 
@@ -107,9 +107,7 @@ error_probability = 0.08
 - `compaction.max_attempts`: maximum physical attempts per logical operation.
 - `compaction.abort_after_ms`: sampled delay before canceling an aborted attempt.
 
-Every logical compaction has a stable `operation_id` and `phase`. Its physical attempts increment `attempt` while reusing that identity. The expected effects are `no_mutation_aborted`, `apply_once`, and `duplicate_noop`. The default probabilities are zero, so normal Codex behavior emits one physical summary request. Compaction requests leave the wire output budget unset; `summary_output_tokens` controls the synthetic summary retained in later prompt shape, not a forced response length. Global, tool-catalog, repository, and session-environment blocks remain stable across compaction.
-
-The plan and per-request results assert the intended logical effects. A client abort only proves that the load generator canceled its wait; proving no engine cache mutation requires request-scoped engine telemetry joined after the run. Codex compaction attempts also emit `x-codex-turn-metadata`. Current Dynamo frontends treat that header as opaque and do not copy it into request-trace `AgentContext`; captured-trace validation therefore gates the resulting KV topology and reports unavailable metadata as a warning.
+See [Compaction](compaction.md) for the logical operation, physical attempts, KV-window changes, and validation limits.
 
 ## Subagents and swarms
 
@@ -119,11 +117,11 @@ The plan and per-request results assert the intended logical effects. A client a
 - `subagents.spawn_delay_ms`: delay between parent completion and child readiness, and the synthetic join delay.
 - `subagents.blocking_probability`: probability that the parent next turn depends on every child completion.
 
-Children inherit the global and root-repository prefixes, receive a unique session prefix, and send parent/session headers for the selected agent adapter.
+See [Subagents and swarms](subagents.md) for graph shape, joins, KV sharing, recursion, and current limits.
 
 ## Safety limits
 
-- `limits.max_nodes`: hard bound on physical model and lifecycle-control requests in the materialized graph.
+- `limits.max_nodes`: hard bound on physical model requests in the materialized graph.
 - `limits.max_sessions`: hard bound on root and child sessions.
 - `limits.max_total_input_tokens`: hard bound on the sum of request input lengths.
 

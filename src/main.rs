@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
             let summary = run_stored_replay(
                 trace,
                 dictionary,
+                Duration::from_millis(prepare_lookahead_ms),
                 ReplayOptions {
                     agent,
                     model,
@@ -90,7 +91,6 @@ async fn main() -> Result<()> {
                     max_in_flight,
                     warmup_connections,
                     http_transport,
-                    prepare_lookahead: Some(Duration::from_millis(prepare_lookahead_ms)),
                     result_flush_interval,
                     max_dispatch_p99_ms,
                     max_dispatch_max_ms,
@@ -168,7 +168,6 @@ async fn main() -> Result<()> {
                     max_in_flight,
                     warmup_connections,
                     http_transport,
-                    prepare_lookahead: None,
                     result_flush_interval,
                     max_dispatch_p99_ms,
                     max_dispatch_max_ms,

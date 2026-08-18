@@ -163,11 +163,10 @@ fn compare_loaded(
     let mut unverifiable_compaction_metadata = 0;
     let mut warnings = Vec::new();
     for (source_request, replay_request) in &pairs {
-        let control_only = source_request.is_session_close();
         compare_field(
             &mut trace_block_size_matches,
             &mut mismatches,
-            control_only || source_request.trace_block_size == replay_request.trace_block_size,
+            source_request.trace_block_size == replay_request.trace_block_size,
             source_request,
             "trace_block_size",
             source_request.trace_block_size,
@@ -176,7 +175,7 @@ fn compare_loaded(
         compare_field(
             &mut input_length_matches,
             &mut mismatches,
-            control_only || source_request.input_tokens == replay_request.input_tokens,
+            source_request.input_tokens == replay_request.input_tokens,
             source_request,
             "input_tokens",
             source_request.input_tokens,
@@ -229,13 +228,8 @@ fn compare_loaded(
         }
     }
 
-    let model_pairs = pairs
-        .iter()
-        .copied()
-        .filter(|(source, _)| !source.is_session_close())
-        .collect::<Vec<_>>();
-    let prefix_topology_matches = canonical_prefix_sequences(&model_pairs, true)
-        == canonical_prefix_sequences(&model_pairs, false);
+    let prefix_topology_matches =
+        canonical_prefix_sequences(&pairs, true) == canonical_prefix_sequences(&pairs, false);
     if !prefix_topology_matches {
         add_mismatch(
             &mut mismatches,
@@ -299,7 +293,6 @@ fn agent_context_core_matches(
         (Some(source), Some(replay)) => {
             source.session_id == replay.session_id
                 && source.parent_session_id == replay.parent_session_id
-                && source.session_final == replay.session_final
                 && source.input_trigger == replay.input_trigger
         }
         _ => false,
@@ -428,7 +421,6 @@ mod tests {
         let source = AgentContext {
             session_id: "thread".to_string(),
             parent_session_id: None,
-            session_final: Some(true),
             compaction: Some(serde_json::json!({"phase": "post_tool"})),
             input_trigger: Some("other".to_string()),
         };
