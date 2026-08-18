@@ -31,6 +31,8 @@ seed = 42
 
 `agent` selects the `claude-code`, `codex`, or `opencode` structural preset. Every remaining field is an optional override. Checked-in profiles contain only intentional deviations from those presets; the sections below define the complete surface.
 
+See [Built-in generator presets](presets.md) for every resolved default, the checked-in profile overrides, and the rationale behind each value.
+
 The override surface is intentionally detailed. Some fields correspond to native agent settings, while others make model-selected runtime outcomes deterministic and tunable for simulation. See [Codex behavior and simulation controls](codex-behavior.md) for a source-derived interpretation of the Codex preset and each class of knob.
 
 ## Distributions

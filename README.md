@@ -73,6 +73,7 @@ Generated traffic is closed-loop: model latency, tool time, compaction, and bloc
 - [How it works](docs/how-it-works.md): timing models, dependency scheduling, subagents, request construction, and module boundaries.
 - [Trace replay](docs/replay.md): trace contract, token synthesis, timing gates, comparison, and telemetry joins.
 - [Generator configuration](docs/generator.md): profiles, distributions, tools, and safety limits.
+- [Built-in generator presets](docs/presets.md): every resolved default, checked-in profile overrides, and why each baseline exists.
 - [Codex behavior and simulation controls](docs/codex-behavior.md): source-derived agent-loop behavior, interpretation of generator knobs, and known fidelity gaps.
 - [Subagents and swarms](docs/subagents.md): delegation graphs, joins, lineage, KV sharing, and current limits.
 - [Compaction](docs/compaction.md): trigger logic, physical attempts, KV-window changes, and telemetry boundaries.
