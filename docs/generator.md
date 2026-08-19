@@ -23,6 +23,18 @@ Generated traffic is closed-loop. The first top-level session tree in each activ
 
 The generator does not execute tools or generate meaningful text. Tool classes sample delay, result-token geometry, failure, and retry behavior. Those sampled outcomes and direct child-session IDs are recorded on their originating node in `scenario.json`.
 
+## Plan graph
+
+`plan` writes `plan.dot` beside `scenario.json`; `generate` writes the same graph into its run directory before traffic starts. It is the canonical causal overview: top-level session trees contain nested child-session clusters, node labels show action and ISL/OSL, and edges label continuation, stream restart, spawn, blocking join, and sampled client-side delay. A non-blocking spawn has a `parent continues` edge. A multi-child blocking join converges on a `join all N children` diamond; only its outgoing edge to the parent successor carries the sampled join delay. A `stream restart` edge joins successive top-level trees in one configured stream and carries the sampled `restart_delay_ms`.
+
+When Graphviz's `dot` executable is on `PATH`, the commands also write `plan.svg`. Otherwise the plan remains successful with `plan.dot`, which can be rendered later:
+
+```bash
+dot -Tsvg plan.dot -o plan.svg
+```
+
+The graph intentionally does not assign durations to model requests. Generated traffic is closed-loop, so model service time comes from the target at execution. It shows all control-flow and client-side timing a user can tune in TOML: initial stream arrival, tool and think delays, child spawn, blocking joins, compaction attempts, and stream restart dependencies.
+
 ## Minimal profile
 
 ```toml

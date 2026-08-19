@@ -65,6 +65,8 @@ Generated traffic is closed-loop: model latency, tool time, compaction, and bloc
 ## Outputs
 
 - `scenario.json`: resolved generated profile and causal graph.
+- `plan.dot`: Graphviz causal DAG grouped by top-level and child sessions, with spawn, join, and delay labels.
+- `plan.svg`: Graphviz rendering of `plan.dot` when the `dot` executable is available.
 - `requests.jsonl`: one result per completed request, including timing and output fidelity.
 - `run.json`: run configuration, bounded timing summaries, fidelity gates, and pass/fail status.
 

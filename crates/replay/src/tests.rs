@@ -508,6 +508,7 @@ async fn generated_graph_releases_tool_successor_after_completion() {
     assert_eq!(topology.total_protocol_sessions, 1);
     assert!(summary.passed);
     assert!(output.path().join("scenario.json").is_file());
+    assert!(output.path().join("plan.dot").is_file());
     server.abort();
 }
 

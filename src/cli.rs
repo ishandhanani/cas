@@ -183,7 +183,7 @@ pub enum Command {
         #[arg(long)]
         config: PathBuf,
 
-        /// Output directory for scenario.json.
+        /// Output directory for scenario.json, plan.dot, and optional plan.svg.
         #[arg(long)]
         output: PathBuf,
     },
@@ -202,7 +202,7 @@ pub enum Command {
         #[arg(long)]
         target: String,
 
-        /// Output directory for scenario.json, run.json, and requests.jsonl.
+        /// Output directory for scenario.json, plan.dot, optional plan.svg, run.json, and requests.jsonl.
         #[arg(long)]
         output: PathBuf,
 

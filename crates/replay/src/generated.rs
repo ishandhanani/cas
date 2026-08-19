@@ -21,7 +21,7 @@ use super::{
 use crate::clock::sleep_until;
 use crate::token_shape::TokenDictionary;
 use agent_loadgen_core::scheduler::ReadyQueue;
-use agent_loadgen_generate::scenario::GeneratedScenario;
+use agent_loadgen_generate::scenario::{GeneratedScenario, write_plan_graph};
 
 pub async fn run_generated_scenario(
     scenario: &GeneratedScenario,
@@ -40,6 +40,7 @@ pub async fn run_generated_scenario(
         )
     })?;
     write_json(&options.output_dir.join("scenario.json"), scenario)?;
+    write_plan_graph(&options.output_dir, scenario)?;
 
     let client = build_http_client(&options)?;
     let target = normalize_target(&options.target);

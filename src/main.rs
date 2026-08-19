@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use agent_loadgen_generate::scenario::{GeneratedScenario, GeneratorConfig};
+use agent_loadgen_generate::scenario::{GeneratedScenario, GeneratorConfig, write_plan_graph};
 use agent_loadgen_replay::telemetry::join_engine_telemetry;
 use agent_loadgen_replay::token_shape::TokenDictionary;
 use agent_loadgen_replay::{ReplayOptions, run_agentic_replay, run_generated_scenario};
@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
             );
             serde_json::to_writer_pretty(writer, &scenario)
                 .with_context(|| format!("failed to write {}", scenario_path.display()))?;
+            let graph_artifacts = write_plan_graph(&output, &scenario)?;
             let output = serde_json::json!({
                 "scenario_digest_sha256": scenario.scenario_digest_sha256,
                 "profile_digest_sha256": scenario.profile_digest_sha256,
@@ -134,6 +135,8 @@ async fn main() -> Result<()> {
                 "tool_parallelism": scenario.tool_parallelism,
                 "trace_manifest": scenario.trace_manifest,
                 "scenario_path": scenario_path,
+                "graph_path": graph_artifacts.dot_path,
+                "graphviz_svg_path": graph_artifacts.svg_path,
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
