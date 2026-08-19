@@ -6,5 +6,5 @@ mod agent;
 mod contracts;
 pub mod scheduler;
 
-pub use agent::{AgentKind, agent_headers, is_managed_header};
+pub use agent::AgentKind;
 pub use contracts::{AgentContext, Percentiles, TraceManifest, TraceRequest, percentiles};
