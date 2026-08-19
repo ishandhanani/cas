@@ -432,13 +432,13 @@ async fn generated_graph_releases_tool_successor_after_completion() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let config: GeneratorConfig = toml::from_str(
         r#"
-                schema_version = 3
+                schema_version = 4
                 agent = "codex"
                 seed = 9
 
                 [load]
-                root_sessions = 1
-                concurrent_agents = 1
+                num_sessions = 1
+                concurrent_sessions = 1
 
                 [trajectory]
                 turns = { kind = "fixed", value = 2 }
@@ -502,6 +502,10 @@ async fn generated_graph_releases_tool_successor_after_completion() {
     .unwrap();
     assert_eq!(summary.succeeded, 2);
     assert_eq!(summary.budgeted_requests, 2);
+    let topology = summary.session_topology.unwrap();
+    assert_eq!(topology.configured_top_level_sessions, 1);
+    assert_eq!(topology.generated_subagent_sessions, 0);
+    assert_eq!(topology.total_protocol_sessions, 1);
     assert!(summary.passed);
     assert!(output.path().join("scenario.json").is_file());
     server.abort();

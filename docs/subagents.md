@@ -56,30 +56,30 @@ parent spawn response --+--> sampled delay --> parent next request
                        +--> child sessions continue independently
 ```
 
-Non-blocking children can outlive the parent session. They can also overlap with the next root task in the same root-agent slot.
+Non-blocking children can outlive the parent session. They can also overlap with the next top-level session tree in the same top-level stream.
 
 ## Session lineage
 
 Each child receives a unique `session_id` and the parent `session_id` as `parent_session_id`. The selected agent adapter maps this lineage to Claude Code, Codex, or OpenCode headers.
 
-`scenario.json` records every generated session with its depth and root-agent slot. The spawning parent node records direct children in `spawned_session_ids`.
+`scenario.json` records every generated session with its depth, `top_level_session_index`, and `top_level_stream_slot`. Its `session_topology` separates the configured top-level session and stream counts from generated subagent protocol sessions. The spawning parent node records direct children in `spawned_session_ids`.
 
 ## KV-prefix shape
 
-All sessions share the global system and tool-catalog blocks. Sessions in one root tree also use the same root-scoped repository block labels. Their overlapping repository prefix is equal. Each session then receives unique environment, user, assistant, and tool-result blocks.
+All sessions share the global system and tool-catalog blocks. Sessions in one top-level tree also use the same tree-scoped repository block labels. Their overlapping repository prefix is equal. Each session then receives unique environment, user, assistant, and tool-result blocks.
 
 ```text
-global system | global tools | root repository | session environment | session history
-<------ shared globally -----> <--- root tree --> <------ unique ------>
+global system | global tools | tree repository | session environment | session history
+<------ shared globally -----> < top-level tree > <------ unique ------>
 ```
 
-The repository token count is sampled when each session is planned. Therefore, root and child repository segments can have different lengths. Equal overlapping blocks still use the same labels.
+The repository token count is sampled when each session is planned. Therefore, top-level and child repository segments can have different lengths. Equal overlapping blocks still use the same labels.
 
 ## Concurrency
 
-`load.concurrent_agents` limits root-agent slots. It does not limit child sessions. A root slot can have one active root task while several descendants also run.
+`load.concurrent_sessions` limits top-level session streams. It does not limit child sessions. A stream can have one active top-level tree while several descendants also run.
 
-The runtime limit `--max-in-flight` caps live HTTP requests across roots and children. Blocking and non-blocking graphs can both reach this cap.
+The runtime limit `--max-in-flight` caps live HTTP requests across top-level sessions and children. Blocking and non-blocking graphs can both reach this cap.
 
 ## Profile controls
 
@@ -90,7 +90,7 @@ The runtime limit `--max-in-flight` caps live HTTP requests across roots and chi
 - `subagents.fanout`: child count for a swarm.
 - `subagents.spawn_delay_ms`: child spawn delay and parent continuation or join delay.
 - `subagents.blocking_probability`: probability that a parent waits for all direct children.
-- `limits.max_sessions`: maximum total root and child sessions.
+- `limits.max_sessions`: maximum total top-level and child protocol sessions.
 
 See [Generator configuration](generator.md) for profile syntax and distributions.
 

@@ -226,6 +226,7 @@ pub(super) fn summarize(
         capacity_performance_conclusions_allowed: conclusion_blockers.is_empty(),
         conclusion_blockers,
         source: source.clone(),
+        session_topology: None,
         token_dictionary: dictionary.clone(),
         request_count: accumulator.request_count,
         budgeted_requests: accumulator.budgeted_requests,

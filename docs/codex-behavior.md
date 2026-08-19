@@ -65,7 +65,7 @@ Codex does not add a synthetic think delay between model requests inside an acti
 - Transport retry backoff.
 - Time before a later user task.
 
-Agent-loadgen maps those effects onto `tools.classes[].latency_ms`, `subagents.spawn_delay_ms`, `trajectory.think_time_ms`, and `load.restart_delay_ms`. Interpret `trajectory.think_time_ms` as a calibrated non-tool continuation delay, not hidden model reasoning time. Use `restart_delay_ms` for the gap between independent root tasks.
+Agent-loadgen maps those effects onto `tools.classes[].latency_ms`, `subagents.spawn_delay_ms`, `trajectory.think_time_ms`, and `load.restart_delay_ms`. Interpret `trajectory.think_time_ms` as a calibrated non-tool continuation delay, not hidden model reasoning time. Use `restart_delay_ms` for the gap between independent top-level session trees.
 
 Generated traffic remains closed-loop: target response time and sampled client-side delays determine when successors become ready.
 

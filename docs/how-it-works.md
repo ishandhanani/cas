@@ -92,11 +92,11 @@ dependencies complete
                  release successors
 ```
 
-`load.concurrent_agents` creates fixed root-agent slots. The first root in each slot follows the configured startup spacing. After a root's last model response completes, that slot starts its next root after `restart_delay_ms`.
+`load.concurrent_sessions` creates fixed top-level session streams. The first session tree in each stream follows the configured startup spacing. After its last model response completes, that stream starts its next top-level session tree after `restart_delay_ms`.
 
-A slower target therefore lowers generated request rate naturally. Independent root slots and child sessions can still overlap.
+A slower target therefore lowers generated request rate naturally. Independent top-level streams and child sessions can still overlap.
 
-Only root request bodies are prepared before the clock anchor. Successor bodies are prepared when their final dependency completes. Token-payload memory therefore follows the runnable graph frontier rather than the total planned input-token count.
+Only initial top-level request bodies are prepared before the clock anchor. Successor bodies are prepared when their final dependency completes. Token-payload memory therefore follows the runnable graph frontier rather than the total planned input-token count.
 
 ## Subagents and swarms
 
@@ -114,7 +114,7 @@ parent model response
         +---- non-blocking ------> parent continues; child runs independently
 ```
 
-Children share global and root-scoped KV labels. Each child receives a unique session prefix and explicit parent lineage. Blocking children delay the parent. Non-blocking children continue independently.
+Children share global and top-level-tree-scoped KV labels. Each child receives a unique session prefix and explicit parent lineage. Blocking children delay the parent. Non-blocking children continue independently.
 
 See [Subagents and swarms](subagents.md) for the dependency rules, supported patterns, and current limits.
 

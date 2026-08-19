@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 use super::config::{GENERATOR_SCHEMA_VERSION, ResolvedGeneratorConfig, ToolClass};
 use super::model::{
     CompactionExpectedEffect, GeneratedCompactionAttempt, GeneratedCompactionOperation,
-    GeneratedNode, GeneratedScenario, GeneratedSession, GeneratedToolEvent,
+    GeneratedNode, GeneratedScenario, GeneratedSession, GeneratedSessionTopology,
+    GeneratedToolEvent,
 };
 use super::tool_parallelism::summarize_tool_parallelism;
 use agent_loadgen_core::{AgentContext, TraceManifest, TraceRequest};
@@ -46,15 +47,15 @@ struct SessionLaunch {
     depth: usize,
     first_dependencies: Vec<usize>,
     first_delay_ms: u64,
-    root_arrival_ms: Option<u64>,
-    lineage_root_sequence: usize,
-    root_agent_slot: usize,
+    initial_arrival_ms: Option<u64>,
+    top_level_session_index: usize,
+    top_level_stream_slot: usize,
 }
 
 struct NodeSpec<'a> {
     dependencies: Vec<usize>,
     delay_after_dependencies_ms: u64,
-    root_arrival_ms: Option<u64>,
+    initial_arrival_ms: Option<u64>,
     action: &'a str,
     input_trigger: &'a str,
     logical_output_tokens: u64,
@@ -116,42 +117,59 @@ impl Planner {
     }
 
     fn generate(mut self) -> Result<GeneratedScenario> {
-        let mut slot_finals = vec![None; self.config.concurrent_agents];
-        for root in 0..self.config.root_sessions {
-            let slot = root % self.config.concurrent_agents;
-            let (dependencies, delay_ms, root_arrival_ms) = match slot_finals[slot] {
-                Some(previous_final) => (
-                    vec![previous_final],
-                    self.config.restart_delay_ms.sample(&mut self.rng)?,
-                    None,
-                ),
-                None => {
-                    let slot = u64::try_from(slot).context("agent slot does not fit u64")?;
-                    let arrival_ms = slot
-                        .checked_mul(self.config.startup_interval_ms)
-                        .context("agent startup timestamp overflow")?;
-                    (Vec::new(), 0, Some(arrival_ms))
-                }
-            };
+        let mut stream_finals = vec![None; self.config.concurrent_sessions];
+        for top_level_session_index in 0..self.config.num_sessions {
+            let top_level_stream_slot = top_level_session_index % self.config.concurrent_sessions;
+            let (dependencies, delay_ms, initial_arrival_ms) =
+                match stream_finals[top_level_stream_slot] {
+                    Some(previous_final) => (
+                        vec![previous_final],
+                        self.config.restart_delay_ms.sample(&mut self.rng)?,
+                        None,
+                    ),
+                    None => {
+                        let stream_slot = u64::try_from(top_level_stream_slot)
+                            .context("top-level stream slot does not fit u64")?;
+                        let arrival_ms = stream_slot
+                            .checked_mul(self.config.startup_interval_ms)
+                            .context("top-level stream startup timestamp overflow")?;
+                        (Vec::new(), 0, Some(arrival_ms))
+                    }
+                };
             let final_node = self
                 .generate_session(SessionLaunch {
                     parent_session_id: None,
                     depth: 0,
                     first_dependencies: dependencies,
                     first_delay_ms: delay_ms,
-                    root_arrival_ms,
-                    lineage_root_sequence: root,
-                    root_agent_slot: slot,
+                    initial_arrival_ms,
+                    top_level_session_index,
+                    top_level_stream_slot,
                 })?
-                .with_context(|| format!("generation limits prevented root session {root}"))?;
-            slot_finals[slot] = Some(final_node);
+                .with_context(|| {
+                    format!(
+                        "generation limits prevented top-level session {top_level_session_index}"
+                    )
+                })?;
+            stream_finals[top_level_stream_slot] = Some(final_node);
         }
         let profile_bytes = serde_json::to_vec(&self.config)?;
         let profile_digest_sha256 = hex::encode(Sha256::digest(&profile_bytes));
         let trace_manifest = self.trace_manifest(profile_digest_sha256.clone())?;
         let tool_parallelism = summarize_tool_parallelism(&self.nodes)?;
+        let session_topology = GeneratedSessionTopology {
+            configured_top_level_sessions: self.config.num_sessions,
+            configured_concurrent_sessions: self.config.concurrent_sessions,
+            generated_subagent_sessions: self
+                .sessions
+                .iter()
+                .filter(|session| session.parent_session_id.is_some())
+                .count(),
+            total_protocol_sessions: self.sessions.len(),
+        };
         let scenario_bytes = serde_json::to_vec(&(
             &profile_digest_sha256,
+            &session_topology,
             &self.sessions,
             &self.nodes,
             &tool_parallelism,
@@ -164,6 +182,7 @@ impl Planner {
             profile_digest_sha256,
             scenario_digest_sha256,
             config: self.config,
+            session_topology,
             sessions: self.sessions,
             nodes: self.nodes,
             tool_parallelism,
@@ -178,9 +197,9 @@ impl Planner {
             depth,
             first_dependencies,
             first_delay_ms,
-            root_arrival_ms,
-            lineage_root_sequence,
-            root_agent_slot,
+            initial_arrival_ms,
+            top_level_session_index,
+            top_level_stream_slot,
         } = launch;
         if self.sessions.len() >= self.config.max_sessions
             || self.nodes.len().saturating_add(1) > self.config.max_nodes
@@ -196,13 +215,14 @@ impl Planner {
             session_id: session_id.clone(),
             parent_session_id: parent_session_id.clone(),
             depth,
-            root_agent_slot,
+            top_level_session_index,
+            top_level_stream_slot,
         });
         let repository_tokens = self.config.repository_tokens.sample(&mut self.rng)?;
         let session_tokens = self.config.session_tokens.sample(&mut self.rng)?;
         let mut blocks = self.shared_prefix.clone();
         blocks.extend(self.segment(
-            &format!("root:{lineage_root_sequence}:repository"),
+            &format!("top-level:{top_level_session_index}:repository"),
             repository_tokens,
         )?);
         blocks.extend(self.segment(&format!("session:{session_id}:environment"), session_tokens)?);
@@ -250,7 +270,7 @@ impl Planner {
                     turn,
                     dependencies,
                     delay_ms,
-                    root_arrival_ms.filter(|_| final_node.is_none()),
+                    initial_arrival_ms.filter(|_| final_node.is_none()),
                     summary_tokens,
                 )?;
                 final_node = operation.last().copied();
@@ -276,7 +296,7 @@ impl Planner {
                 NodeSpec {
                     dependencies,
                     delay_after_dependencies_ms: delay_ms,
-                    root_arrival_ms: root_arrival_ms.filter(|_| final_node.is_none()),
+                    initial_arrival_ms: initial_arrival_ms.filter(|_| final_node.is_none()),
                     action: action.name(),
                     input_trigger: next_trigger,
                     logical_output_tokens: output_tokens,
@@ -369,9 +389,9 @@ impl Planner {
                             depth: depth + 1,
                             first_dependencies: vec![node],
                             first_delay_ms: spawn_delay,
-                            root_arrival_ms: None,
-                            lineage_root_sequence,
-                            root_agent_slot,
+                            initial_arrival_ms: None,
+                            top_level_session_index,
+                            top_level_stream_slot,
                         })? {
                             child_finals.push(child_final);
                             spawned_session_ids
@@ -464,7 +484,7 @@ impl Planner {
         turn: usize,
         mut dependencies: Vec<usize>,
         delay_after_dependencies_ms: u64,
-        root_arrival_ms: Option<u64>,
+        initial_arrival_ms: Option<u64>,
         summary_tokens: u64,
     ) -> Result<Vec<usize>> {
         let phase = "pre_turn";
@@ -531,7 +551,7 @@ impl Planner {
                     } else {
                         0
                     },
-                    root_arrival_ms: if index == 0 { root_arrival_ms } else { None },
+                    initial_arrival_ms: if index == 0 { initial_arrival_ms } else { None },
                     action: "compaction_attempt",
                     input_trigger: "other",
                     logical_output_tokens: if expected_effect == CompactionExpectedEffect::ApplyOnce
@@ -586,8 +606,8 @@ impl Planner {
         if self.nodes.len() >= self.config.max_nodes {
             bail!("generated scenario reached max_nodes");
         }
-        if spec.dependencies.is_empty() != spec.root_arrival_ms.is_some() {
-            bail!("each generated request must have dependencies or one root arrival");
+        if spec.dependencies.is_empty() != spec.initial_arrival_ms.is_some() {
+            bail!("each generated request must have dependencies or one initial arrival");
         }
         if spec
             .dependencies
@@ -631,7 +651,7 @@ impl Planner {
             source_model: None,
             input_tokens,
             output_tokens,
-            request_received_ms: spec.root_arrival_ms.unwrap_or(0),
+            request_received_ms: spec.initial_arrival_ms.unwrap_or(0),
             trace_block_size: self.config.block_size,
             input_sequence_hashes,
             agent_context: Some(AgentContext {
@@ -646,7 +666,7 @@ impl Planner {
             action: spec.action.to_string(),
             dependencies: spec.dependencies,
             delay_after_dependencies_ms: spec.delay_after_dependencies_ms,
-            root_arrival_ms: spec.root_arrival_ms,
+            initial_arrival_ms: spec.initial_arrival_ms,
             window_epoch: state.window_epoch,
             tool_events: Vec::new(),
             spawned_session_ids: Vec::new(),
@@ -711,10 +731,10 @@ impl Planner {
                 .checked_add(node.request.output_tokens as u64)
                 .context("generated output token total overflow")
         })?;
-        let last_root_arrival = self
+        let last_initial_arrival = self
             .nodes
             .iter()
-            .filter_map(|node| node.root_arrival_ms)
+            .filter_map(|node| node.initial_arrival_ms)
             .max()
             .unwrap_or(0);
         Ok(TraceManifest {
@@ -722,8 +742,8 @@ impl Planner {
             session_count: self.sessions.len(),
             requests_with_agent_context: self.nodes.len(),
             first_request_received_ms: 0,
-            last_request_received_ms: last_root_arrival,
-            duration_ms: last_root_arrival,
+            last_request_received_ms: last_initial_arrival,
+            duration_ms: last_initial_arrival,
             input_tokens,
             output_tokens,
             distinct_sequence_hashes: hashes.len(),

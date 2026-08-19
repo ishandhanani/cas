@@ -26,7 +26,7 @@ The generator supports these patterns:
 - A blocking join that waits for all direct children.
 - Non-blocking delegation that lets the parent and children continue independently.
 
-Child trajectories can include tools, compaction, and more delegation. `load.concurrent_agents` limits root slots only. Child sessions can increase live concurrency.
+Child trajectories can include tools, compaction, and more delegation. `load.concurrent_sessions` limits top-level session streams only. Child sessions are generated descendants and can increase live concurrency.
 
 The generator does not support child roles, per-child profiles, child-to-child messages, voting, work stealing, persistent pools, or runtime model decisions. Planning samples the full graph before execution.
 

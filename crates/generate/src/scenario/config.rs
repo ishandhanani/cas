@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub(super) use super::distribution::UIntDistribution;
 use agent_loadgen_core::AgentKind;
 
-pub const GENERATOR_SCHEMA_VERSION: u32 = 3;
+pub const GENERATOR_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,13 +40,13 @@ pub struct GeneratorConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoadOverrides {
-    /// Total root-agent tasks generated for the finite run.
-    pub root_sessions: Option<usize>,
-    /// Number of closed-loop root-agent slots kept active.
-    pub concurrent_agents: Option<usize>,
-    /// Ramp-up spacing between the first task in each active slot.
+    /// Total top-level agent session trees generated for the finite run.
+    pub num_sessions: Option<usize>,
+    /// Number of closed-loop top-level session streams kept active.
+    pub concurrent_sessions: Option<usize>,
+    /// Ramp-up spacing between the first task in each active top-level stream.
     pub startup_interval_ms: Option<u64>,
-    /// Delay before a completed slot starts its next root-agent task.
+    /// Delay before a completed top-level stream starts its next session tree.
     pub restart_delay_ms: Option<UIntDistribution>,
 }
 
@@ -136,8 +136,8 @@ pub struct ToolClass {
 pub struct ResolvedGeneratorConfig {
     pub agent: AgentKind,
     pub seed: u64,
-    pub root_sessions: usize,
-    pub concurrent_agents: usize,
+    pub num_sessions: usize,
+    pub concurrent_sessions: usize,
     pub startup_interval_ms: u64,
     pub restart_delay_ms: UIntDistribution,
     pub turns: UIntDistribution,
@@ -195,8 +195,11 @@ impl GeneratorConfig {
             );
         }
         let mut resolved = ResolvedGeneratorConfig::preset(self.agent, self.seed);
-        replace(&mut resolved.root_sessions, self.load.root_sessions);
-        replace(&mut resolved.concurrent_agents, self.load.concurrent_agents);
+        replace(&mut resolved.num_sessions, self.load.num_sessions);
+        replace(
+            &mut resolved.concurrent_sessions,
+            self.load.concurrent_sessions,
+        );
         replace(
             &mut resolved.startup_interval_ms,
             self.load.startup_interval_ms,
@@ -330,8 +333,8 @@ impl ResolvedGeneratorConfig {
         Self {
             agent,
             seed,
-            root_sessions: 16,
-            concurrent_agents: 8,
+            num_sessions: 16,
+            concurrent_sessions: 8,
             startup_interval_ms: 0,
             restart_delay_ms: UIntDistribution::fixed(0),
             turns: UIntDistribution::uniform(4, 10),
@@ -374,17 +377,17 @@ impl ResolvedGeneratorConfig {
     }
 
     pub(super) fn validate(&self) -> Result<()> {
-        if self.root_sessions == 0 {
-            bail!("root_sessions must be greater than zero");
+        if self.num_sessions == 0 {
+            bail!("num_sessions must be greater than zero");
         }
-        if self.concurrent_agents == 0 {
-            bail!("concurrent_agents must be greater than zero");
+        if self.concurrent_sessions == 0 {
+            bail!("concurrent_sessions must be greater than zero");
         }
-        if self.concurrent_agents > self.root_sessions {
-            bail!("concurrent_agents must not exceed root_sessions");
+        if self.concurrent_sessions > self.num_sessions {
+            bail!("concurrent_sessions must not exceed num_sessions");
         }
-        if self.root_sessions > self.max_sessions || self.root_sessions > self.max_nodes {
-            bail!("generation limits cannot hold all configured root sessions");
+        if self.num_sessions > self.max_sessions || self.num_sessions > self.max_nodes {
+            bail!("generation limits cannot hold all configured top-level sessions");
         }
         if self.block_size == 0 {
             bail!("token block size must be greater than zero");
@@ -549,7 +552,7 @@ mod tests {
     fn rejects_trajectories_that_can_have_zero_turns() {
         let config: GeneratorConfig = toml::from_str(
             r#"
-                schema_version = 3
+                schema_version = 4
                 agent = "codex"
 
                 [trajectory]
@@ -564,11 +567,26 @@ mod tests {
     fn rejects_removed_same_session_background_requests() {
         let config = toml::from_str::<GeneratorConfig>(
             r#"
-                schema_version = 3
+                schema_version = 4
                 agent = "codex"
 
                 [behavior]
                 background_request_probability = 0.1
+            "#,
+        );
+        assert!(config.is_err());
+    }
+
+    #[test]
+    fn rejects_legacy_top_level_session_names() {
+        let config = toml::from_str::<GeneratorConfig>(
+            r#"
+                schema_version = 4
+                agent = "codex"
+
+                [load]
+                root_sessions = 1
+                concurrent_agents = 1
             "#,
         );
         assert!(config.is_err());

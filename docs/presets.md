@@ -1,6 +1,6 @@
 # Built-in generator presets
 
-This page records every default resolved by generator schema version 3. A profile only needs `schema_version` and `agent`; omitted fields inherit these values. `scenario.json.config` is always the authoritative resolved configuration for a particular plan.
+This page records every default resolved by generator schema version 4. A profile only needs `schema_version` and `agent`; omitted fields inherit these values. `scenario.json.config` is always the authoritative resolved configuration for a particular plan.
 
 The presets are starting points for repeatable simulation, not claims that every Claude Code, Codex, or OpenCode deployment has these exact distributions. Values fall into four broad categories:
 
@@ -23,7 +23,7 @@ All sampling is deterministic for the resolved seed. Token segments are rounded 
 
 | Field | Default | Why |
 |---|---:|---|
-| `schema_version` | Required: `3` | Prevents an older profile from silently acquiring new semantics. |
+| `schema_version` | Required: `4` | Prevents an older profile from silently acquiring new semantics. |
 | `agent` | Required | Selects Claude Code, Codex, or OpenCode context headers and agent-specific preset values. |
 | `seed` | `0` | Makes a minimal profile deterministic. Checked-in balanced profiles explicitly use `42` for stable examples. |
 
@@ -31,12 +31,12 @@ All sampling is deterministic for the resolved seed. Token segments are rounded 
 
 | Field | Default | Why |
 |---|---:|---|
-| `load.root_sessions` | `16` | Keeps the default finite plan small enough for a quick smoke while producing multiple trajectories. |
-| `load.concurrent_agents` | `8` | Exercises closed-loop concurrency without treating the preset as a production capacity target. |
-| `load.startup_interval_ms` | `0` | Starts the initial root population together so concurrency is visible immediately. |
-| `load.restart_delay_ms` | `fixed(0)` | Replaces a completed root task immediately; users should add measured user/task idle time when modeling an interactive fleet. |
+| `load.num_sessions` | `16` | Keeps the default finite plan small enough for a quick smoke while producing multiple top-level session trees. |
+| `load.concurrent_sessions` | `8` | Exercises closed-loop top-level stream concurrency without treating the preset as a production capacity target. |
+| `load.startup_interval_ms` | `0` | Starts the initial top-level population together so concurrency is visible immediately. |
+| `load.restart_delay_ms` | `fixed(0)` | Replaces a completed top-level session tree immediately; users should add measured user/task idle time when modeling an interactive fleet. |
 
-These are root-agent slots. Subagents can push live session and request concurrency above `load.concurrent_agents`.
+These are top-level session streams. Subagents are generated within those session trees and can push live session and request concurrency above `load.concurrent_sessions`.
 
 ## Trajectory defaults
 

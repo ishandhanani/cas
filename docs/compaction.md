@@ -45,7 +45,7 @@ The planner adds a synthetic compaction instruction to the request input. After 
 stable prefix | summary blocks | retained recent blocks
 ```
 
-The stable prefix contains the global system blocks, tool-catalog blocks, root repository blocks, and session-environment blocks. `compaction.retained_recent_tokens` controls the recent non-stable suffix.
+The stable prefix contains the global system blocks, tool-catalog blocks, top-level-tree repository blocks, and session-environment blocks. `compaction.retained_recent_tokens` controls the recent non-stable suffix.
 
 The operation changes the planned context once. Aborted and duplicate attempts do not apply another window change.
 

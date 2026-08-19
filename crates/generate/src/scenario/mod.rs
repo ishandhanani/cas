@@ -11,6 +11,6 @@ mod tool_parallelism;
 pub use config::{GeneratorConfig, ResolvedGeneratorConfig};
 pub use model::{
     CompactionExpectedEffect, GeneratedCompactionAttempt, GeneratedCompactionOperation,
-    GeneratedNode, GeneratedScenario, GeneratedSession, GeneratedToolEvent,
-    GeneratedToolParallelism,
+    GeneratedNode, GeneratedScenario, GeneratedSession, GeneratedSessionTopology,
+    GeneratedToolEvent, GeneratedToolParallelism,
 };

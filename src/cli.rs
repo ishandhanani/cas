@@ -236,7 +236,7 @@ pub enum Command {
         #[arg(long, default_value_t = 50.0)]
         max_dispatch_max_ms: f64,
 
-        /// Delay before the first root session starts.
+        /// Delay before the first top-level session tree starts.
         #[arg(long, default_value_t = 100)]
         start_delay_ms: u64,
 

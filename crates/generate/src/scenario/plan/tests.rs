@@ -6,8 +6,8 @@ use agent_loadgen_core::AgentKind;
 
 fn config(agent: AgentKind) -> ResolvedGeneratorConfig {
     let mut config = ResolvedGeneratorConfig::preset(agent, 42);
-    config.root_sessions = 3;
-    config.concurrent_agents = 3;
+    config.num_sessions = 3;
+    config.concurrent_sessions = 3;
     config.turns = UIntDistribution::fixed(4);
     config.subagent_turns = UIntDistribution::fixed(2);
     config.system_prefix_tokens = UIntDistribution::fixed(64);
@@ -56,7 +56,7 @@ fn profile_preserves_global_prefix_sharing() {
     let roots = scenario
         .nodes
         .iter()
-        .filter(|node| node.root_arrival_ms.is_some())
+        .filter(|node| node.initial_arrival_ms.is_some())
         .collect::<Vec<_>>();
     assert_eq!(roots.len(), 3);
     assert_eq!(
@@ -68,8 +68,8 @@ fn profile_preserves_global_prefix_sharing() {
 #[test]
 fn compaction_rewrites_a_window_and_emits_metadata() {
     let mut config = config(AgentKind::Codex);
-    config.root_sessions = 1;
-    config.concurrent_agents = 1;
+    config.num_sessions = 1;
+    config.concurrent_sessions = 1;
     config.context_window_tokens = 160;
     config.compaction_trigger_fraction = 0.75;
     let scenario = GeneratedScenario::generate(config).unwrap();
@@ -93,8 +93,8 @@ fn compaction_rewrites_a_window_and_emits_metadata() {
 #[test]
 fn compaction_attempts_share_identity_and_apply_once() {
     let mut config = config(AgentKind::Codex);
-    config.root_sessions = 1;
-    config.concurrent_agents = 1;
+    config.num_sessions = 1;
+    config.concurrent_sessions = 1;
     config.context_window_tokens = 160;
     config.compaction_trigger_fraction = 0.75;
     config.compaction_abort_probability = 1.0;
@@ -135,8 +135,8 @@ fn compaction_attempts_share_identity_and_apply_once() {
 #[test]
 fn blocking_swarm_joins_all_children() {
     let mut config = config(AgentKind::ClaudeCode);
-    config.root_sessions = 1;
-    config.concurrent_agents = 1;
+    config.num_sessions = 1;
+    config.concurrent_sessions = 1;
     config.turns = UIntDistribution::fixed(2);
     config.subagent_turns = UIntDistribution::fixed(1);
     config.tool_probability = 0.0;
@@ -149,6 +149,15 @@ fn blocking_swarm_joins_all_children() {
     config.compaction_enabled = false;
     let scenario = GeneratedScenario::generate(config).unwrap();
     assert_eq!(scenario.sessions.len(), 4);
+    assert_eq!(
+        scenario.session_topology,
+        GeneratedSessionTopology {
+            configured_top_level_sessions: 1,
+            configured_concurrent_sessions: 1,
+            generated_subagent_sessions: 3,
+            total_protocol_sessions: 4,
+        }
+    );
     let root_completion = scenario
         .nodes
         .iter()
@@ -173,12 +182,15 @@ fn blocking_swarm_joins_all_children() {
     assert!(scenario.sessions.iter().skip(1).all(|session| {
         session.parent_session_id.as_deref() == Some(scenario.sessions[0].session_id.as_str())
     }));
+    assert!(scenario.sessions.iter().all(|session| {
+        session.top_level_session_index == 0 && session.top_level_stream_slot == 0
+    }));
 }
 
 #[test]
-fn closed_loop_slot_restarts_after_its_previous_root_completes() {
+fn closed_loop_stream_restarts_after_its_previous_top_level_session_completes() {
     let mut config = config(AgentKind::Codex);
-    config.concurrent_agents = 1;
+    config.concurrent_sessions = 1;
     config.turns = UIntDistribution::fixed(1);
     config.tool_probability = 0.0;
     config.parallel_tool_probability = 0.0;
@@ -190,9 +202,9 @@ fn closed_loop_slot_restarts_after_its_previous_root_completes() {
 
     let scenario = GeneratedScenario::generate(config).unwrap();
     assert_eq!(scenario.nodes.len(), 3);
-    assert_eq!(scenario.nodes[0].root_arrival_ms, Some(0));
+    assert_eq!(scenario.nodes[0].initial_arrival_ms, Some(0));
     assert!(scenario.nodes[0].dependencies.is_empty());
-    assert_eq!(scenario.nodes[1].root_arrival_ms, None);
+    assert_eq!(scenario.nodes[1].initial_arrival_ms, None);
     assert_eq!(scenario.nodes[1].dependencies, vec![0]);
     assert_eq!(scenario.nodes[1].delay_after_dependencies_ms, 17);
     assert_eq!(scenario.nodes[2].dependencies, vec![1]);
@@ -201,15 +213,15 @@ fn closed_loop_slot_restarts_after_its_previous_root_completes() {
         scenario
             .sessions
             .iter()
-            .all(|session| session.root_agent_slot == 0)
+            .all(|session| session.top_level_stream_slot == 0)
     );
 }
 
 #[test]
 fn reports_call_and_time_weighted_tool_parallelism() {
     let mut config = config(AgentKind::Codex);
-    config.root_sessions = 1;
-    config.concurrent_agents = 1;
+    config.num_sessions = 1;
+    config.concurrent_sessions = 1;
     config.turns = UIntDistribution::fixed(2);
     config.tool_probability = 0.0;
     config.parallel_tool_probability = 1.0;

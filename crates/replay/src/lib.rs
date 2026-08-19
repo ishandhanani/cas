@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use agent_loadgen_core::{AgentContext, AgentKind, TraceManifest};
-use agent_loadgen_generate::scenario::{CompactionExpectedEffect, GeneratedCompactionAttempt};
+use agent_loadgen_generate::scenario::{
+    CompactionExpectedEffect, GeneratedCompactionAttempt, GeneratedSessionTopology,
+};
 
 use crate::token_shape::TokenDictionaryManifest;
 
@@ -113,6 +115,8 @@ pub struct RunSummary {
     pub capacity_performance_conclusions_allowed: bool,
     pub conclusion_blockers: Vec<String>,
     pub source: TraceManifest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_topology: Option<GeneratedSessionTopology>,
     pub token_dictionary: TokenDictionaryManifest,
     pub request_count: usize,
     pub budgeted_requests: usize,

@@ -2,29 +2,31 @@
 
 Generator profiles are strict, versioned TOML. Unknown fields and unsupported schema versions fail during planning. `scenario.json` contains the fully resolved configuration, so a run does not depend on hidden defaults after planning.
 
-Schema version 3 removes `behavior.background_request_probability`. Independent work uses subagents with separate session lineage and explicit dependencies.
+Schema version 4 calls the load controls `num_sessions` and `concurrent_sessions`. They count only top-level agent session trees; subagent sessions are generated descendants in those trees. This version also retains the removal of `behavior.background_request_probability`: independent work uses subagents with separate session lineage and explicit dependencies.
+
+Schema 3 profiles are intentionally rejected. Replace `root_sessions` with `num_sessions` and `concurrent_agents` with `concurrent_sessions`; there are no compatibility aliases.
 
 ## Execution model
 
 ```text
-active-agent slot -> root task -> model request
+top-level stream -> session tree -> model request
                                   |
                                   +--text----------think delay------> next request
                                   +--tool----------tool latency-----> next request
                                   +--parallel tools-max latency-----> next request
                                   +--subagent------child completion-> parent join
                                   +--swarm---------all children-----> parent join
-                                  +--complete response--restart delay------> next root task in slot
+                                  +--complete response--restart delay------> next session tree in stream
 ```
 
-Generated traffic is closed-loop. The first task in each active-agent slot starts during the configured ramp-up. Every later request becomes ready only after all graph dependencies complete, plus its sampled virtual delay. The final model response completes the task. The slot starts its next root task after `restart_delay_ms`. Target response latency therefore controls the generated request rate. The scheduler can still run independent slots and sibling subagents concurrently. A blocking child or swarm joins the parent. A non-blocking child continues in its own session while the parent continues.
+Generated traffic is closed-loop. The first top-level session tree in each active stream starts during the configured ramp-up. Every later request becomes ready only after all graph dependencies complete, plus its sampled virtual delay. The final model response completes that session tree. The stream starts its next top-level session tree after `restart_delay_ms`. Target response latency therefore controls the generated request rate. The scheduler can still run independent streams and sibling subagents concurrently. A blocking child or swarm joins the parent. A non-blocking child continues in its own session while the parent continues.
 
 The generator does not execute tools or generate meaningful text. Tool classes sample delay, result-token geometry, failure, and retry behavior. Those sampled outcomes and direct child-session IDs are recorded on their originating node in `scenario.json`.
 
 ## Minimal profile
 
 ```toml
-schema_version = 3
+schema_version = 4
 agent = "codex"
 seed = 42
 ```
@@ -49,22 +51,22 @@ All sampling uses the profile seed. Log-normal samples are rounded and clamped t
 
 ## Load
 
-- `load.root_sessions`: total root tasks in the finite generated run.
-- `load.concurrent_agents`: number of closed-loop root-agent slots. It must not exceed `root_sessions`.
-- `load.startup_interval_ms`: spacing between the first task in each slot; zero starts the full population together.
-- `load.restart_delay_ms`: sampled idle delay between a completed root task and its slot's next task.
+- `load.num_sessions`: total top-level agent session trees in the finite generated run.
+- `load.concurrent_sessions`: number of closed-loop top-level session streams. It must not exceed `num_sessions`.
+- `load.startup_interval_ms`: spacing between the first session tree in each stream; zero starts the full population together.
+- `load.restart_delay_ms`: sampled idle delay between a completed session tree and its stream's next tree.
 
-For example, `root_sessions = 100` and `concurrent_agents = 10` runs ten active root agents, each processing ten tasks. With a zero restart delay, every slot replaces a completed task immediately. Subagents can temporarily push live request concurrency above ten.
+For example, `num_sessions = 100` and `concurrent_sessions = 10` runs ten active top-level streams, each processing ten session trees. With a zero restart delay, every stream replaces a completed tree immediately. Subagents are generated inside those trees and are not counted by either setting, but can temporarily push live request concurrency above ten.
 
 ## Trajectory and token shape
 
-- `trajectory.turns`: maximum foreground model turns per root session.
+- `trajectory.turns`: maximum foreground model turns per top-level session.
 - `trajectory.think_time_ms`: delay after a sampled text response.
 - `trajectory.output_tokens`: requested output length.
 - `tokens.block_size`: generated KV block size and token-segment quantization.
 - `tokens.system_prefix_tokens`: global prefix shared by every session.
 - `tokens.tool_catalog_tokens`: global tool-definition prefix shared by every session.
-- `tokens.repository_tokens`: prefix shared by one root and all of its descendants.
+- `tokens.repository_tokens`: prefix shared by one top-level session tree and all of its descendants.
 - `tokens.session_tokens`: environment/instruction prefix unique to a session.
 - `tokens.user_tokens`: appended user-message size.
 - `tokens.tool_result_tokens`: appended parent join-result size after child agents.
@@ -111,7 +113,7 @@ error_probability = 0.08
 - `tool_wall_ms`: sum of each phase's critical-path duration.
 - `work_to_wall_ratio`: tool work divided by tool wall time.
 
-Generated calls in a parallel phase start together. Its wall time is the longest call, and its interval with at least two active calls is the second-longest call. These metrics describe harness-internal batching; they do not count incidental overlap between independent root agents or subagents.
+Generated calls in a parallel phase start together. Its wall time is the longest call, and its interval with at least two active calls is the second-longest call. These metrics describe harness-internal batching; they do not count incidental overlap between independent top-level streams or subagents.
 
 ## Compaction
 
@@ -140,11 +142,11 @@ See [Subagents and swarms](subagents.md) for graph shape, joins, KV sharing, rec
 ## Safety limits
 
 - `limits.max_nodes`: hard bound on physical model requests in the materialized graph.
-- `limits.max_sessions`: hard bound on root and child sessions.
+- `limits.max_sessions`: hard bound on all protocol sessions, including top-level sessions and generated descendants.
 - `limits.max_total_input_tokens`: hard bound on the sum of request input lengths.
 
 Planning fails when a hard limit is exceeded. These limits bound generated-plan memory; they do not cap live HTTP concurrency, which is controlled by `--max-in-flight`.
 
 ## Reproducibility
 
-The plan records a resolved-profile SHA-256 digest and a scenario SHA-256 digest. Given the same binary behavior and config, the same seed produces the same sessions, graph, token labels, and samples. Runtime request IDs and measured timing are intentionally run-specific.
+The plan records a resolved-profile SHA-256 digest and a scenario SHA-256 digest. Given the same binary behavior and config, the same seed produces the same top-level session trees, descendant graph, token labels, and samples. Runtime request IDs and measured timing are intentionally run-specific. `session_topology` in `scenario.json` separates configured top-level streams from generated child protocol sessions.

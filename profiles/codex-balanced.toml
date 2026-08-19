@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-schema_version = 3
+schema_version = 4
 agent = "codex"
 seed = 42
 

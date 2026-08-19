@@ -75,16 +75,16 @@ pub async fn run_generated_scenario(
     for (ordinal, node) in scenario.nodes.iter().enumerate() {
         if node.dependencies.is_empty() {
             let arrival_ms = node
-                .root_arrival_ms
-                .with_context(|| format!("root node {ordinal} has no root arrival"))?;
+                .initial_arrival_ms
+                .with_context(|| format!("initial node {ordinal} has no initial arrival"))?;
             prepared[ordinal] = Some(request_factory.prepare(ordinal)?);
             ready.push(
                 scaled_offset_ns(arrival_ms, options.time_scale)?,
                 ordinal,
                 ordinal,
             );
-        } else if node.root_arrival_ms.is_some() {
-            bail!("dependent node {ordinal} also has a root arrival");
+        } else if node.initial_arrival_ms.is_some() {
+            bail!("dependent node {ordinal} also has an initial arrival");
         }
     }
     warm_connections(&client, &target, &options).await?;
@@ -175,7 +175,7 @@ pub async fn run_generated_scenario(
             scenario.nodes.len()
         );
     }
-    let summary = summarize(
+    let mut summary = summarize(
         SummaryIdentity {
             traffic_kind: TrafficKind::SyntheticKvShape,
             run_id,
@@ -187,6 +187,7 @@ pub async fn run_generated_scenario(
         &scheduler.sink.accumulator,
         wall_started.elapsed(),
     );
+    summary.session_topology = Some(scenario.session_topology.clone());
     write_json(&options.output_dir.join("run.json"), &summary)?;
     Ok(summary)
 }
