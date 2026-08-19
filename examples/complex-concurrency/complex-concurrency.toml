@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Deliberately small but topology-rich visual example. Not a production preset.
+schema_version = 4
+agent = "codex"
+seed = 20260819
+
+[load]
+num_sessions = 6
+concurrent_sessions = 3
+startup_interval_ms = 200
+restart_delay_ms = { kind = "fixed", value = 350 }
+
+[trajectory]
+turns = { kind = "fixed", value = 5 }
+think_time_ms = { kind = "fixed", value = 150 }
+output_tokens = { kind = "fixed", value = 512 }
+
+[tokens]
+repository_tokens = { kind = "fixed", value = 4096 }
+session_tokens = { kind = "fixed", value = 512 }
+user_tokens = { kind = "fixed", value = 512 }
+tool_result_tokens = { kind = "fixed", value = 2048 }
+context_window_tokens = 40000
+
+[behavior]
+tool_probability = 0.18
+parallel_tool_probability = 0.18
+subagent_probability = 0.30
+swarm_probability = 0.22
+completion_probability = 0.00
+
+[compaction]
+enabled = true
+trigger_fraction = 0.75
+summary_input_tokens = { kind = "fixed", value = 512 }
+summary_output_tokens = { kind = "fixed", value = 1024 }
+retained_recent_tokens = 4096
+abort_probability = 0.25
+retry_probability = 0.25
+max_attempts = 3
+abort_after_ms = { kind = "fixed", value = 25 }
+
+[subagents]
+max_depth = 1
+turns = { kind = "fixed", value = 3 }
+fanout = { kind = "fixed", value = 2 }
+spawn_delay_ms = { kind = "fixed", value = 80 }
+blocking_probability = 0.70
+
+[tools]
+parallel_count = { kind = "fixed", value = 3 }
+retry_probability = 0.20
+
+[limits]
+max_nodes = 500
+max_sessions = 48
+max_total_input_tokens = 10000000

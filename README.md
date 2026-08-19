@@ -80,6 +80,7 @@ Generated traffic is closed-loop: model latency, tool time, compaction, and bloc
 - [Codex behavior and simulation controls](docs/codex-behavior.md): source-derived agent-loop behavior, interpretation of generator knobs, and known fidelity gaps.
 - [Subagents and swarms](docs/subagents.md): delegation graphs, joins, lineage, KV sharing, and current limits.
 - [Compaction](docs/compaction.md): trigger logic, physical attempts, KV-window changes, and telemetry boundaries.
+- [Complex concurrent plan example](examples/complex-concurrency/README.md): a topology-rich TOML profile with its rendered causal graph.
 
 ## Current boundaries
 
