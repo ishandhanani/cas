@@ -15,6 +15,7 @@ use crate::token_shape::TokenDictionaryManifest;
 
 mod artifacts;
 mod captured;
+mod causal;
 mod clock;
 mod generated;
 mod request;
