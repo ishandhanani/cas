@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 mod agentic;
 pub mod compare;
 
-pub use agentic::{AgenticTrace, AgenticTurn};
+pub use agentic::{AgenticToolEvent, AgenticTrace, AgenticTurn};
 
 const TRACE_SCHEMA_V1: &str = "dynamo.request.trace.v1";
 
@@ -64,8 +64,23 @@ struct ReplayMetrics {
 #[derive(Debug, Clone, Deserialize)]
 struct ToolMetrics {
     tool_call_id: String,
+    tool_class: String,
     #[serde(default)]
     claude: Option<ClaudeToolReplayMetrics>,
+    #[serde(default)]
+    started_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    ended_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    duration_ms: Option<f64>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    output_bytes: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    error_type: Option<String>,
 }
 
 /// Claude-only evidence used to disambiguate a subagent launch and join.
@@ -122,8 +137,16 @@ pub(crate) struct RequestEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct ToolEntry {
     pub(crate) session_id: String,
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
     pub(crate) tool_call_id: String,
+    pub(crate) tool_class: String,
     pub(crate) claude: Option<ClaudeToolReplayMetrics>,
+    pub(crate) status: String,
+    pub(crate) duration_ms: f64,
+    pub(crate) output_bytes: Option<u64>,
+    pub(crate) output_tokens: Option<u64>,
+    pub(crate) error_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -166,7 +189,8 @@ pub(crate) fn load_trace(
                     requests.push(entry);
                 }
                 "tool_end" | "tool_error" => {
-                    if let Some(tool) = compile_tool(record) {
+                    let terminal_event = record.event_type.clone();
+                    if let Some(tool) = compile_tool(record, &terminal_event) {
                         tools.push(tool);
                     }
                 }
@@ -382,14 +406,45 @@ fn compile_request(record: TraceRecord) -> Result<RequestEntry> {
     })
 }
 
-fn compile_tool(record: TraceRecord) -> Option<ToolEntry> {
+fn compile_tool(record: TraceRecord, terminal_event: &str) -> Option<ToolEntry> {
     let context = record.agent_context?;
     let tool = record.tool?;
-    let _ = tool.claude.as_ref()?;
+    let end_ms = tool
+        .ended_at_unix_ms
+        .map(saturating_i64)
+        .unwrap_or_else(|| saturating_i64(record.event_time_unix_ms));
+    let start_ms = tool
+        .started_at_unix_ms
+        .map(saturating_i64)
+        .or_else(|| {
+            tool.duration_ms
+                .map(|duration| end_ms.saturating_sub(duration.max(0.0).round() as i64))
+        })
+        .unwrap_or(end_ms);
+    if end_ms < start_ms {
+        return None;
+    }
+    let duration_ms = tool
+        .duration_ms
+        .unwrap_or_else(|| (end_ms - start_ms).max(0) as f64);
     Some(ToolEntry {
         session_id: context.session_id,
+        start_ms,
+        end_ms,
         tool_call_id: tool.tool_call_id,
+        tool_class: tool.tool_class,
         claude: tool.claude,
+        status: tool.status.unwrap_or_else(|| {
+            if terminal_event == "tool_error" {
+                "error".to_string()
+            } else {
+                "succeeded".to_string()
+            }
+        }),
+        duration_ms,
+        output_bytes: tool.output_bytes,
+        output_tokens: tool.output_tokens,
+        error_type: tool.error_type,
     })
 }
 
