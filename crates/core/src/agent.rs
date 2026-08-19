@@ -62,20 +62,22 @@ pub fn agent_headers(
 }
 
 pub fn is_managed_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "x-request-id"
-            | "x-dynamo-session-id"
-            | "x-dynamo-parent-session-id"
-            | "x-claude-code-session-id"
-            | "x-claude-code-agent-id"
-            | "x-claude-code-parent-agent-id"
-            | "thread-id"
-            | "x-codex-parent-thread-id"
-            | "x-codex-turn-metadata"
-            | "x-session-id"
-            | "x-parent-session-id"
-    )
+    const MANAGED_HEADERS: &[&str] = &[
+        "x-request-id",
+        "x-dynamo-session-id",
+        "x-dynamo-parent-session-id",
+        "x-claude-code-session-id",
+        "x-claude-code-agent-id",
+        "x-claude-code-parent-agent-id",
+        "thread-id",
+        "x-codex-parent-thread-id",
+        "x-codex-turn-metadata",
+        "x-session-id",
+        "x-parent-session-id",
+    ];
+    MANAGED_HEADERS
+        .iter()
+        .any(|header| name.eq_ignore_ascii_case(header))
 }
 
 #[cfg(test)]

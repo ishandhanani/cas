@@ -14,6 +14,7 @@ top-level stream -> session tree -> model request
                                   +--text----------think delay------> next request
                                   +--tool----------tool latency-----> next request
                                   +--parallel tools-max latency-----> next request
+                                  +--compaction attempt-compaction latency----> next request
                                   +--subagent------child completion-> parent join
                                   +--swarm---------all children-----> parent join
                                   +--complete response--restart delay------> next session tree in stream

@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 mod agentic;
 pub mod compare;
 
-pub use agentic::{AgenticToolEvent, AgenticTrace, AgenticTurn};
+pub use agentic::{AgenticTrace, AgenticTurn};
 
 const TRACE_SCHEMA_V1: &str = "dynamo.request.trace.v1";
 
@@ -64,23 +64,8 @@ struct ReplayMetrics {
 #[derive(Debug, Clone, Deserialize)]
 struct ToolMetrics {
     tool_call_id: String,
-    tool_class: String,
     #[serde(default)]
     claude: Option<ClaudeToolReplayMetrics>,
-    #[serde(default)]
-    started_at_unix_ms: Option<u64>,
-    #[serde(default)]
-    ended_at_unix_ms: Option<u64>,
-    #[serde(default)]
-    duration_ms: Option<f64>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    output_bytes: Option<u64>,
-    #[serde(default)]
-    output_tokens: Option<u64>,
-    #[serde(default)]
-    error_type: Option<String>,
 }
 
 /// Claude-only evidence used to disambiguate a subagent launch and join.
@@ -137,16 +122,8 @@ pub(crate) struct RequestEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct ToolEntry {
     pub(crate) session_id: String,
-    pub(crate) start_ms: i64,
-    pub(crate) end_ms: i64,
     pub(crate) tool_call_id: String,
-    pub(crate) tool_class: String,
     pub(crate) claude: Option<ClaudeToolReplayMetrics>,
-    pub(crate) status: String,
-    pub(crate) duration_ms: f64,
-    pub(crate) output_bytes: Option<u64>,
-    pub(crate) output_tokens: Option<u64>,
-    pub(crate) error_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,8 +166,7 @@ pub(crate) fn load_trace(
                     requests.push(entry);
                 }
                 "tool_end" | "tool_error" => {
-                    let terminal_event = record.event_type.clone();
-                    if let Some(tool) = compile_tool(record, &terminal_event) {
+                    if let Some(tool) = compile_tool(record) {
                         tools.push(tool);
                     }
                 }
@@ -406,45 +382,14 @@ fn compile_request(record: TraceRecord) -> Result<RequestEntry> {
     })
 }
 
-fn compile_tool(record: TraceRecord, terminal_event: &str) -> Option<ToolEntry> {
+fn compile_tool(record: TraceRecord) -> Option<ToolEntry> {
     let context = record.agent_context?;
     let tool = record.tool?;
-    let end_ms = tool
-        .ended_at_unix_ms
-        .map(saturating_i64)
-        .unwrap_or_else(|| saturating_i64(record.event_time_unix_ms));
-    let start_ms = tool
-        .started_at_unix_ms
-        .map(saturating_i64)
-        .or_else(|| {
-            tool.duration_ms
-                .map(|duration| end_ms.saturating_sub(duration.max(0.0).round() as i64))
-        })
-        .unwrap_or(end_ms);
-    if end_ms < start_ms {
-        return None;
-    }
-    let duration_ms = tool
-        .duration_ms
-        .unwrap_or_else(|| (end_ms - start_ms).max(0) as f64);
+    let _ = tool.claude.as_ref()?;
     Some(ToolEntry {
         session_id: context.session_id,
-        start_ms,
-        end_ms,
         tool_call_id: tool.tool_call_id,
-        tool_class: tool.tool_class,
         claude: tool.claude,
-        status: tool.status.unwrap_or_else(|| {
-            if terminal_event == "tool_error" {
-                "error".to_string()
-            } else {
-                "succeeded".to_string()
-            }
-        }),
-        duration_ms,
-        output_bytes: tool.output_bytes,
-        output_tokens: tool.output_tokens,
-        error_type: tool.error_type,
     })
 }
 
@@ -452,16 +397,25 @@ fn make_manifest<'a>(
     requests: impl IntoIterator<Item = &'a TraceRequest>,
     source_digest: &[u8],
 ) -> Result<TraceManifest> {
-    let requests = requests.into_iter().collect::<Vec<_>>();
-    let first = requests.first().context("trace has no requests")?;
-    let last = requests.last().context("trace has no requests")?;
+    let mut requests = requests.into_iter();
+    let first = requests.next().context("trace has no requests")?;
     let mut sessions = BTreeSet::new();
     let mut hashes = BTreeSet::new();
     let mut block_sizes = BTreeSet::new();
-    let mut input_tokens = 0_u64;
-    let mut output_tokens = 0_u64;
+    let mut input_tokens = first.input_tokens as u64;
+    let mut output_tokens = first.output_tokens as u64;
+    let mut request_count = 1_usize;
+    let mut last_request_received_ms = first.request_received_ms;
 
-    for request in &requests {
+    let context = first
+        .agent_context
+        .as_ref()
+        .context("agent-loadgen requires agent_context on every request")?;
+    sessions.insert(&context.session_id);
+    hashes.extend(first.input_sequence_hashes.iter().copied());
+    block_sizes.insert(first.trace_block_size);
+
+    for request in requests {
         let context = request
             .agent_context
             .as_ref()
@@ -475,20 +429,20 @@ fn make_manifest<'a>(
         output_tokens = output_tokens
             .checked_add(request.output_tokens as u64)
             .context("output token count overflow")?;
+        last_request_received_ms = request.request_received_ms;
+        request_count += 1;
     }
     if block_sizes.len() != 1 {
         bail!("shape-strict replay requires one trace_block_size, found {block_sizes:?}");
     }
 
     Ok(TraceManifest {
-        request_count: requests.len(),
+        request_count,
         session_count: sessions.len(),
-        requests_with_agent_context: requests.len(),
+        requests_with_agent_context: request_count,
         first_request_received_ms: first.request_received_ms,
-        last_request_received_ms: last.request_received_ms,
-        duration_ms: last
-            .request_received_ms
-            .saturating_sub(first.request_received_ms),
+        last_request_received_ms,
+        duration_ms: last_request_received_ms.saturating_sub(first.request_received_ms),
         input_tokens,
         output_tokens,
         distinct_sequence_hashes: hashes.len(),

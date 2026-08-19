@@ -1,6 +1,5 @@
 [workspace]
 members = [".", "crates/core", "crates/trace", "crates/generate", "crates/replay"]
-resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
@@ -28,7 +27,7 @@ agent-loadgen-trace = { version = "0.1.0", path = "crates/trace" }
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [profile.release]
 lto = "thin"

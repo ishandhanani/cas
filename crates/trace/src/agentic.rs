@@ -6,9 +6,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use anyhow::{Result, anyhow, bail};
-use serde::Serialize;
 
-use super::{LoadedTrace, RequestEntry, ToolEntry};
+use super::{LoadedTrace, RequestEntry};
 use agent_loadgen_core::{TraceManifest, TraceRequest};
 
 #[derive(Debug, Clone)]
@@ -23,25 +22,6 @@ pub struct AgenticTurn {
     pub dependencies: Vec<usize>,
     pub root_arrival_ms: Option<u64>,
     pub delay_after_dependencies_ms: u64,
-    pub non_tool_delay_ms: u64,
-    pub tool_wait_ms: u64,
-    pub tool_events: Vec<AgenticToolEvent>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct AgenticToolEvent {
-    pub tool_call_id: String,
-    pub tool_class: String,
-    pub started_at_unix_ms: u64,
-    pub ended_at_unix_ms: u64,
-    pub duration_ms: f64,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_type: Option<String>,
 }
 
 pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
@@ -89,17 +69,6 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
             }
         }
     }
-    for indices in session_to_indices.values_mut() {
-        indices.sort_by_key(|index| {
-            let request = &loaded.requests[*index];
-            (
-                request.start_ms,
-                request.end_ms,
-                request.request.source_request_id.clone(),
-            )
-        });
-    }
-
     let mut explicit_tool_by_child = HashMap::new();
     for tool in &loaded.tools {
         let Some(claude) = &tool.claude else {
@@ -159,13 +128,11 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
     }
 
     let mut dependencies = vec![Vec::new(); loaded.requests.len()];
-    let mut previous_request_start_ms = vec![None; loaded.requests.len()];
     for indices in session_to_indices.values() {
         for (position, index) in indices.iter().copied().enumerate() {
             if position > 0 {
                 let previous_index = indices[position - 1];
                 push_unique(&mut dependencies[index], previous_index);
-                previous_request_start_ms[index] = Some(loaded.requests[previous_index].start_ms);
             }
         }
     }
@@ -253,17 +220,6 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
     }
     validate_dependency_dag(&loaded.requests, &dependencies)?;
 
-    let mut tools_by_session: HashMap<String, Vec<ToolEntry>> = HashMap::new();
-    for tool in loaded.tools {
-        tools_by_session
-            .entry(tool.session_id.clone())
-            .or_default()
-            .push(tool);
-    }
-    for tools in tools_by_session.values_mut() {
-        tools.sort_by_key(|tool| (tool.start_ms, tool.end_ms));
-    }
-
     let request_end_ms = loaded
         .requests
         .iter()
@@ -274,63 +230,27 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
         .into_iter()
         .enumerate()
         .map(|(index, request)| {
-            let context = request
-                .request
-                .agent_context
-                .as_ref()
-                .expect("trace loading requires agent context");
             let dependency_end_ms = dependencies[index]
                 .iter()
                 .map(|dependency| request_end_ms[*dependency])
                 .max();
-            let (
-                root_arrival_ms,
-                delay_after_dependencies_ms,
-                non_tool_delay_ms,
-                tool_wait_ms,
-                tool_events,
-            ) = if let Some(dependency_end_ms) = dependency_end_ms {
-                let observed_gap_ms =
-                    request.start_ms.saturating_sub(dependency_end_ms).max(0) as u64;
-                let tool_event_start_ms =
-                    previous_request_start_ms[index].unwrap_or(dependency_end_ms);
-                let (raw_tool_wait_ms, contributing) = tools_by_session
-                    .get(&context.session_id)
-                    .map(|tools| {
-                        collect_tools_in_window(
-                            tools,
-                            &request.request.source_request_id,
-                            tool_event_start_ms,
-                            dependency_end_ms,
-                            request.start_ms,
-                        )
-                    })
-                    .unwrap_or_else(|| (0, Vec::new()));
-                let tool_wait_ms = raw_tool_wait_ms.min(observed_gap_ms);
-                (
-                    None,
-                    observed_gap_ms,
-                    observed_gap_ms - tool_wait_ms,
-                    tool_wait_ms,
-                    contributing.into_iter().map(tool_entry_to_event).collect(),
-                )
-            } else {
-                (
-                    Some(request.start_ms.saturating_sub(global_start_ms).max(0) as u64),
-                    0,
-                    0,
-                    0,
-                    Vec::new(),
-                )
-            };
+            let (root_arrival_ms, delay_after_dependencies_ms) =
+                if let Some(dependency_end_ms) = dependency_end_ms {
+                    (
+                        None,
+                        request.start_ms.saturating_sub(dependency_end_ms).max(0) as u64,
+                    )
+                } else {
+                    (
+                        Some(request.start_ms.saturating_sub(global_start_ms).max(0) as u64),
+                        0,
+                    )
+                };
             AgenticTurn {
                 request: request.request,
                 dependencies: std::mem::take(&mut dependencies[index]),
                 root_arrival_ms,
                 delay_after_dependencies_ms,
-                non_tool_delay_ms,
-                tool_wait_ms,
-                tool_events,
             }
         })
         .collect();
@@ -363,72 +283,6 @@ fn first_request_starting_after(
         .copied()
         .filter(|index| requests[*index].start_ms >= timestamp_ms)
         .min_by_key(|index| requests[*index].start_ms)
-}
-
-fn collect_tools_in_window<'a>(
-    tools: &'a [ToolEntry],
-    request_id: &str,
-    event_start_ms: i64,
-    wait_start_ms: i64,
-    end_ms: i64,
-) -> (u64, Vec<&'a ToolEntry>) {
-    let mut contributing = Vec::new();
-    let mut intervals = Vec::new();
-    for tool in tools {
-        let claude = tool.claude.as_ref();
-        if let Some(consumer_request_id) =
-            claude.and_then(|metadata| metadata.consumer_request_id.as_deref())
-        {
-            if consumer_request_id != request_id {
-                continue;
-            }
-        } else if claude.is_some_and(|metadata| metadata.execution_mode == "background")
-            || tool.end_ms <= event_start_ms
-            || tool.end_ms > end_ms
-        {
-            continue;
-        }
-        contributing.push(tool);
-        let clipped_start = tool.start_ms.max(wait_start_ms);
-        let clipped_end = tool.end_ms.min(end_ms);
-        if clipped_end > clipped_start {
-            intervals.push((clipped_start, clipped_end));
-        }
-    }
-    intervals.sort_unstable();
-
-    let mut total = 0_i64;
-    let mut current: Option<(i64, i64)> = None;
-    for (start, end) in intervals {
-        match current {
-            None => current = Some((start, end)),
-            Some((current_start, current_end)) if start <= current_end => {
-                current = Some((current_start, current_end.max(end)));
-            }
-            Some((current_start, current_end)) => {
-                total += current_end - current_start;
-                current = Some((start, end));
-            }
-        }
-    }
-    if let Some((current_start, current_end)) = current {
-        total += current_end - current_start;
-    }
-    (total.max(0) as u64, contributing)
-}
-
-fn tool_entry_to_event(entry: &ToolEntry) -> AgenticToolEvent {
-    AgenticToolEvent {
-        tool_call_id: entry.tool_call_id.clone(),
-        tool_class: entry.tool_class.clone(),
-        started_at_unix_ms: entry.start_ms.max(0) as u64,
-        ended_at_unix_ms: entry.end_ms.max(0) as u64,
-        duration_ms: entry.duration_ms,
-        status: entry.status.clone(),
-        output_bytes: entry.output_bytes,
-        output_tokens: entry.output_tokens,
-        error_type: entry.error_type.clone(),
-    }
 }
 
 fn push_unique(values: &mut Vec<usize>, value: usize) {
@@ -575,21 +429,13 @@ mod tests {
             ],
             tools: vec![ToolEntry {
                 session_id: "root".to_string(),
-                start_ms: 1_100,
-                end_ms: 1_800,
                 tool_call_id: "agent-call".to_string(),
-                tool_class: "Agent".to_string(),
                 claude: Some(ClaudeToolReplayMetrics {
                     source_request_id: "parent-1".to_string(),
                     consumer_request_id: Some("parent-3".to_string()),
                     child_session_id: Some("child".to_string()),
                     execution_mode: "background".to_string(),
                 }),
-                status: "succeeded".to_string(),
-                duration_ms: 700.0,
-                output_bytes: None,
-                output_tokens: None,
-                error_type: None,
             }],
             manifest: manifest(4),
         })
@@ -599,7 +445,5 @@ mod tests {
         assert_eq!(trace.turns[2].dependencies, vec![0]);
         assert_eq!(trace.turns[3].dependencies, vec![2, 1]);
         assert_eq!(trace.turns[3].delay_after_dependencies_ms, 150);
-        assert_eq!(trace.turns[3].tool_wait_ms, 100);
-        assert_eq!(trace.turns[3].non_tool_delay_ms, 50);
     }
 }

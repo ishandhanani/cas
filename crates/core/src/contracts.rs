@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AgentContext {
     pub session_id: String,
     #[serde(default)]
@@ -13,7 +13,7 @@ pub struct AgentContext {
     pub input_trigger: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TraceRequest {
     pub ordinal: usize,
     pub source_request_id: String,

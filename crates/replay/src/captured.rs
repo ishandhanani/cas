@@ -291,12 +291,3 @@ impl CapturedSchedulerState<'_> {
         Ok(())
     }
 }
-
-#[cfg(test)]
-pub(super) async fn run_replay(
-    trace: AgenticTrace,
-    dictionary: TokenDictionary,
-    options: ReplayOptions,
-) -> Result<RunSummary> {
-    run_agentic_replay(trace, dictionary, options).await
-}

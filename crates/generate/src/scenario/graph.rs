@@ -49,7 +49,7 @@ pub fn write_plan_graph(
 /// The graph is a causal overview, not a wall-clock forecast: it includes the
 /// sampled client-side delay before each request, while target model-service
 /// time remains a runtime-dependent closed-loop value.
-pub fn render_plan_dot(scenario: &GeneratedScenario) -> Result<String> {
+fn render_plan_dot(scenario: &GeneratedScenario) -> Result<String> {
     let sessions = scenario
         .sessions
         .iter()

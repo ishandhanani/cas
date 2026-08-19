@@ -14,7 +14,7 @@ use tempfile::tempdir;
 use super::request::scaled_offset_ns;
 use super::*;
 use crate::token_shape::{SafeTokenAlphabet, TokenDictionary};
-use agent_loadgen_core::{AgentContext, TraceRequest};
+use agent_loadgen_core::{AgentContext, TraceRequest, percentiles};
 use agent_loadgen_generate::scenario::{GeneratedScenario, GeneratorConfig};
 use agent_loadgen_trace::{AgenticTrace, AgenticTurn};
 
@@ -134,9 +134,6 @@ async fn replay_sends_shape_and_agent_headers() {
             dependencies: Vec::new(),
             root_arrival_ms: Some(0),
             delay_after_dependencies_ms: 0,
-            non_tool_delay_ms: 0,
-            tool_wait_ms: 0,
-            tool_events: Vec::new(),
         }],
         manifest: TraceManifest {
             request_count: 1,
@@ -158,7 +155,7 @@ async fn replay_sends_shape_and_agent_headers() {
     )
     .unwrap();
     let output = tempdir().unwrap();
-    let summary = run_replay(
+    let summary = run_agentic_replay(
         trace,
         dictionary,
         ReplayOptions {
@@ -263,9 +260,6 @@ async fn recorded_scheduler_handles_tied_millisecond_arrivals() {
                 dependencies: Vec::new(),
                 root_arrival_ms: Some((ordinal / 3) as u64),
                 delay_after_dependencies_ms: 0,
-                non_tool_delay_ms: 0,
-                tool_wait_ms: 0,
-                tool_events: Vec::new(),
             })
             .collect(),
         manifest: TraceManifest {
@@ -283,7 +277,7 @@ async fn recorded_scheduler_handles_tied_millisecond_arrivals() {
         },
     };
     let output = tempdir().unwrap();
-    let summary = run_replay(
+    let summary = run_agentic_replay(
         trace,
         dictionary,
         ReplayOptions {
@@ -360,18 +354,12 @@ async fn captured_successor_waits_for_actual_completion_plus_recorded_gap() {
                 dependencies: Vec::new(),
                 root_arrival_ms: Some(0),
                 delay_after_dependencies_ms: 0,
-                non_tool_delay_ms: 0,
-                tool_wait_ms: 0,
-                tool_events: Vec::new(),
             },
             AgenticTurn {
                 request: requests[1].clone(),
                 dependencies: vec![0],
                 root_arrival_ms: None,
                 delay_after_dependencies_ms: 50,
-                non_tool_delay_ms: 50,
-                tool_wait_ms: 0,
-                tool_events: Vec::new(),
             },
         ],
         manifest: TraceManifest {
@@ -389,7 +377,7 @@ async fn captured_successor_waits_for_actual_completion_plus_recorded_gap() {
         },
     };
     let output = tempdir().unwrap();
-    let summary = run_replay(
+    let summary = run_agentic_replay(
         trace,
         dictionary,
         ReplayOptions {
