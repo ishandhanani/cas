@@ -2,7 +2,7 @@ digraph agent_loadgen_plan {
   graph [rankdir=LR, compound=true, newrank=true, pad=0.25, nodesep=0.35, ranksep=0.75, fontname="Helvetica"];
   node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10, margin="0.08,0.05", color="#4b5563"];
   edge [fontname="Helvetica", fontsize=9, color="#6b7280", arrowsize=0.7];
-  label="agent-loadgen generated plan\n6 top-level session trees · 3 concurrent streams · 20 child sessions · 135 model requests";
+  label="agent-loadgen generated plan\n6 top-level session trees · 3 concurrent streams · 20 child sessions · 119 model requests";
   labelloc=t;
   fontsize=18;
 
@@ -14,19 +14,18 @@ digraph agent_loadgen_plan {
     color="#cbd5e1"; style="rounded"; penwidth=1;
     n0 [label="node 0 · tool\nISL 25136 · OSL 512\ninitial arrival 0 ms\n1 tool calls", fillcolor="#ffedd5"];
     n1 [label="node 1 · parallel tools\nISL 27648 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
-    n2 [label="node 2 · compaction attempt\nISL 33536 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n3 [label="node 3 · compaction attempt\nISL 33536 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n4 [label="node 4 · subagent\nISL 29744 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
-    n8 [label="node 8 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n9 [label="node 9 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
-    n10 [label="node 10 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n11 [label="node 11 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+    n2 [label="node 2 · compaction attempt\nISL 33536 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n3 [label="node 3 · subagent\nISL 29744 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
+    n7 [label="node 7 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n8 [label="node 8 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
+    n9 [label="node 9 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n10 [label="node 10 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     subgraph cluster_session_0_1 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-1";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n5 [label="node 5 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n6 [label="node 6 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n7 [label="node 7 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n4 [label="node 4 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n5 [label="node 5 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n6 [label="node 6 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
   }
   }
@@ -36,47 +35,44 @@ digraph agent_loadgen_plan {
   subgraph cluster_session_1_2 {
     label="parent session · depth 0 · generated-00000000013527d3-session-2";
     color="#cbd5e1"; style="rounded"; penwidth=1;
-    n12 [label="node 12 · tool\nISL 25136 · OSL 512\ninitial arrival 200 ms\n1 tool calls", fillcolor="#ffedd5"];
-    n13 [label="node 13 · swarm\nISL 27568 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
-    n24 [label="node 24 · compaction attempt\nISL 30640 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n25 [label="node 25 · swarm\nISL 29744 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
-    n32 [label="node 32 · compaction attempt\nISL 32816 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n33 [label="node 33 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n34 [label="node 34 · compaction attempt\nISL 32816 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n35 [label="node 35 · tool\nISL 29744 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
-    n36 [label="node 36 · compaction attempt\nISL 34768 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n37 [label="node 37 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+    n11 [label="node 11 · tool\nISL 25136 · OSL 512\ninitial arrival 200 ms\n1 tool calls", fillcolor="#ffedd5"];
+    n12 [label="node 12 · swarm\nISL 27568 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
+    n22 [label="node 22 · compaction attempt\nISL 30640 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n23 [label="node 23 · swarm\nISL 29744 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
+    n30 [label="node 30 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n31 [label="node 31 · tool\nISL 29744 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
+    n32 [label="node 32 · compaction attempt\nISL 34768 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n33 [label="node 33 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     subgraph cluster_session_1_3 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-3";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n14 [label="node 14 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
-      n15 [label="node 15 · text\nISL 29344 · OSL 512", fillcolor="#dbeafe"];
-      n16 [label="node 16 · compaction attempt\nISL 30880 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n17 [label="node 17 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+      n13 [label="node 13 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
+      n14 [label="node 14 · text\nISL 29344 · OSL 512", fillcolor="#dbeafe"];
+      n15 [label="node 15 · compaction attempt\nISL 30880 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n16 [label="node 16 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_1_4 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-4";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n18 [label="node 18 · parallel tools\nISL 25136 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
-      n19 [label="node 19 · compaction attempt\nISL 34048 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n20 [label="node 20 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
-      n21 [label="node 21 · compaction attempt\nISL 31280 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-      n22 [label="node 22 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n23 [label="node 23 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+      n17 [label="node 17 · parallel tools\nISL 25136 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
+      n18 [label="node 18 · compaction attempt\nISL 34048 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n19 [label="node 19 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
+      n20 [label="node 20 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n21 [label="node 21 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_1_5 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-5";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n26 [label="node 26 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n27 [label="node 27 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n28 [label="node 28 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n24 [label="node 24 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n25 [label="node 25 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n26 [label="node 26 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_1_6 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-6";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n29 [label="node 29 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n30 [label="node 30 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n31 [label="node 31 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n27 [label="node 27 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n28 [label="node 28 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n29 [label="node 29 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
   }
   }
@@ -86,45 +82,42 @@ digraph agent_loadgen_plan {
   subgraph cluster_session_2_7 {
     label="parent session · depth 0 · generated-00000000013527d3-session-7";
     color="#cbd5e1"; style="rounded"; penwidth=1;
-    n38 [label="node 38 · swarm\nISL 25136 · OSL 512\ninitial arrival 400 ms\nspawns 2 child sessions", fillcolor="#dcfce7"];
-    n45 [label="node 45 · subagent\nISL 27696 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
-    n51 [label="node 51 · compaction attempt\nISL 30768 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n52 [label="node 52 · subagent\nISL 29744 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
-    n56 [label="node 56 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n57 [label="node 57 · compaction attempt\nISL 32816 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n58 [label="node 58 · tool\nISL 29744 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
-    n59 [label="node 59 · compaction attempt\nISL 33152 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n60 [label="node 60 · compaction attempt\nISL 33152 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n61 [label="node 61 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+    n34 [label="node 34 · swarm\nISL 25136 · OSL 512\ninitial arrival 400 ms\nspawns 2 child sessions", fillcolor="#dcfce7"];
+    n41 [label="node 41 · subagent\nISL 27696 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
+    n46 [label="node 46 · compaction attempt\nISL 30768 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n47 [label="node 47 · subagent\nISL 29744 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
+    n51 [label="node 51 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n52 [label="node 52 · tool\nISL 29744 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
+    n53 [label="node 53 · compaction attempt\nISL 33152 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n54 [label="node 54 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     subgraph cluster_session_2_10 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-10";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n46 [label="node 46 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
-      n47 [label="node 47 · parallel tools\nISL 27648 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
-      n48 [label="node 48 · compaction attempt\nISL 46768 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n49 [label="node 49 · compaction attempt\nISL 46768 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-      n50 [label="node 50 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+      n42 [label="node 42 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
+      n43 [label="node 43 · parallel tools\nISL 27648 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
+      n44 [label="node 44 · compaction attempt\nISL 46768 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n45 [label="node 45 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_2_11 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-11";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n53 [label="node 53 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n54 [label="node 54 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n55 [label="node 55 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n48 [label="node 48 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n49 [label="node 49 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n50 [label="node 50 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_2_8 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-8";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n39 [label="node 39 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n40 [label="node 40 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n41 [label="node 41 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n35 [label="node 35 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n36 [label="node 36 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n37 [label="node 37 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_2_9 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-9";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n42 [label="node 42 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n43 [label="node 43 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n44 [label="node 44 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n38 [label="node 38 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n39 [label="node 39 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n40 [label="node 40 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
   }
   }
@@ -134,57 +127,51 @@ digraph agent_loadgen_plan {
   subgraph cluster_session_3_12 {
     label="parent session · depth 0 · generated-00000000013527d3-session-12";
     color="#cbd5e1"; style="rounded"; penwidth=1;
-    n62 [label="node 62 · swarm\nISL 25136 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
-    n70 [label="node 70 · swarm\nISL 27696 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
-    n77 [label="node 77 · compaction attempt\nISL 30768 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n78 [label="node 78 · compaction attempt\nISL 30768 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n79 [label="node 79 · subagent\nISL 29744 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
-    n87 [label="node 87 · compaction attempt\nISL 32816 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n88 [label="node 88 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n89 [label="node 89 · compaction attempt\nISL 32816 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n90 [label="node 90 · tool\nISL 29744 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
-    n91 [label="node 91 · compaction attempt\nISL 35760 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n92 [label="node 92 · compaction attempt\nISL 35760 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n93 [label="node 93 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+    n55 [label="node 55 · swarm\nISL 25136 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
+    n63 [label="node 63 · swarm\nISL 27696 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
+    n70 [label="node 70 · compaction attempt\nISL 30768 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n71 [label="node 71 · subagent\nISL 29744 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
+    n77 [label="node 77 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n78 [label="node 78 · tool\nISL 29744 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
+    n79 [label="node 79 · compaction attempt\nISL 35760 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n80 [label="node 80 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     subgraph cluster_session_3_13 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-13";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n63 [label="node 63 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n64 [label="node 64 · parallel tools\nISL 26160 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
-      n65 [label="node 65 · compaction attempt\nISL 43408 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n66 [label="node 66 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+      n56 [label="node 56 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n57 [label="node 57 · parallel tools\nISL 26160 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
+      n58 [label="node 58 · compaction attempt\nISL 43408 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n59 [label="node 59 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_3_14 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-14";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n67 [label="node 67 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n68 [label="node 68 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n69 [label="node 69 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n60 [label="node 60 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n61 [label="node 61 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n62 [label="node 62 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_3_15 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-15";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n71 [label="node 71 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n72 [label="node 72 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n73 [label="node 73 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n64 [label="node 64 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n65 [label="node 65 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n66 [label="node 66 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_3_16 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-16";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n74 [label="node 74 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
-      n75 [label="node 75 · text\nISL 28656 · OSL 512", fillcolor="#dbeafe"];
-      n76 [label="node 76 · complete\nISL 29680 · OSL 512", fillcolor="#f3e8ff"];
+      n67 [label="node 67 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
+      n68 [label="node 68 · text\nISL 28656 · OSL 512", fillcolor="#dbeafe"];
+      n69 [label="node 69 · complete\nISL 29680 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_3_17 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-17";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n80 [label="node 80 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
-      n81 [label="node 81 · compaction attempt\nISL 31088 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n82 [label="node 82 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
-      n83 [label="node 83 · compaction attempt\nISL 31280 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-      n84 [label="node 84 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n85 [label="node 85 · compaction attempt\nISL 31280 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-      n86 [label="node 86 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+      n72 [label="node 72 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
+      n73 [label="node 73 · compaction attempt\nISL 31088 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n74 [label="node 74 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
+      n75 [label="node 75 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n76 [label="node 76 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     }
   }
   }
@@ -194,52 +181,51 @@ digraph agent_loadgen_plan {
   subgraph cluster_session_4_18 {
     label="parent session · depth 0 · generated-00000000013527d3-session-18";
     color="#cbd5e1"; style="rounded"; penwidth=1;
-    n94 [label="node 94 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
-    n95 [label="node 95 · subagent\nISL 26880 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
-    n99 [label="node 99 · swarm\nISL 29440 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
-    n106 [label="node 106 · compaction attempt\nISL 32512 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n107 [label="node 107 · swarm\nISL 29744 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
-    n119 [label="node 119 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n120 [label="node 120 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+    n81 [label="node 81 · tool\nISL 25136 · OSL 512\n1 tool calls", fillcolor="#ffedd5"];
+    n82 [label="node 82 · subagent\nISL 26880 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
+    n86 [label="node 86 · swarm\nISL 29440 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
+    n93 [label="node 93 · compaction attempt\nISL 32512 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n94 [label="node 94 · swarm\nISL 29744 · OSL 512\nspawns 2 child sessions", fillcolor="#dcfce7"];
+    n105 [label="node 105 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n106 [label="node 106 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     subgraph cluster_session_4_19 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-19";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n96 [label="node 96 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n97 [label="node 97 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n98 [label="node 98 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n83 [label="node 83 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n84 [label="node 84 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n85 [label="node 85 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_4_20 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-20";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n100 [label="node 100 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n101 [label="node 101 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n102 [label="node 102 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n87 [label="node 87 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n88 [label="node 88 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n89 [label="node 89 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_4_21 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-21";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n103 [label="node 103 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n104 [label="node 104 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n105 [label="node 105 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n90 [label="node 90 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n91 [label="node 91 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n92 [label="node 92 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_4_22 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-22";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n108 [label="node 108 · parallel tools\nISL 25136 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
-      n109 [label="node 109 · compaction attempt\nISL 37344 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n110 [label="node 110 · compaction attempt\nISL 37344 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-      n111 [label="node 111 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
-      n112 [label="node 112 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n113 [label="node 113 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+      n95 [label="node 95 · parallel tools\nISL 25136 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
+      n96 [label="node 96 · compaction attempt\nISL 37344 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n97 [label="node 97 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
+      n98 [label="node 98 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n99 [label="node 99 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     }
     subgraph cluster_session_4_23 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-23";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n114 [label="node 114 · parallel tools\nISL 25136 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
-      n115 [label="node 115 · compaction attempt\nISL 32144 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n116 [label="node 116 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
-      n117 [label="node 117 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-      n118 [label="node 118 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+      n100 [label="node 100 · parallel tools\nISL 25136 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
+      n101 [label="node 101 · compaction attempt\nISL 32144 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n102 [label="node 102 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
+      n103 [label="node 103 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+      n104 [label="node 104 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     }
   }
   }
@@ -249,177 +235,159 @@ digraph agent_loadgen_plan {
   subgraph cluster_session_5_24 {
     label="parent session · depth 0 · generated-00000000013527d3-session-24";
     color="#cbd5e1"; style="rounded"; penwidth=1;
-    n121 [label="node 121 · parallel tools\nISL 25136 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
-    n122 [label="node 122 · compaction attempt\nISL 30736 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n123 [label="node 123 · parallel tools\nISL 29744 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
-    n124 [label="node 124 · compaction attempt\nISL 34176 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n125 [label="node 125 · compaction attempt\nISL 34176 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n126 [label="node 126 · subagent\nISL 29744 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
-    n130 [label="node 130 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n131 [label="node 131 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
-    n132 [label="node 132 · compaction attempt\nISL 31280 · OSL 0\ncompaction attempt", fillcolor="#fef3c7"];
-    n133 [label="node 133 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
-    n134 [label="node 134 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
+    n107 [label="node 107 · parallel tools\nISL 25136 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
+    n108 [label="node 108 · compaction attempt\nISL 30736 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n109 [label="node 109 · parallel tools\nISL 29744 · OSL 512\n3 tool calls", fillcolor="#fee2e2"];
+    n110 [label="node 110 · compaction attempt\nISL 34176 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n111 [label="node 111 · subagent\nISL 29744 · OSL 512\nspawns 1 child sessions", fillcolor="#ccfbf1"];
+    n115 [label="node 115 · compaction attempt\nISL 32816 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n116 [label="node 116 · text\nISL 29744 · OSL 512", fillcolor="#dbeafe"];
+    n117 [label="node 117 · compaction attempt\nISL 31280 · OSL 1024\ncompaction attempt", fillcolor="#fef3c7"];
+    n118 [label="node 118 · complete\nISL 29744 · OSL 512", fillcolor="#f3e8ff"];
     subgraph cluster_session_5_25 {
       label="subagent session · depth 1 · generated-00000000013527d3-session-25";
       color="#cbd5e1"; style="rounded"; penwidth=1;
-      n127 [label="node 127 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
-      n128 [label="node 128 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
-      n129 [label="node 129 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
+      n112 [label="node 112 · text\nISL 25136 · OSL 512", fillcolor="#dbeafe"];
+      n113 [label="node 113 · text\nISL 26160 · OSL 512", fillcolor="#dbeafe"];
+      n114 [label="node 114 · complete\nISL 27184 · OSL 512", fillcolor="#f3e8ff"];
     }
   }
   }
   n0 -> n1 [label="continue + 350 ms"];
   n1 -> n2 [label="continue + 758 ms"];
   n2 -> n3 [label="continue"];
-  n3 -> n4 [label="continue"];
-  n4 -> n5 [label="spawn + 80 ms", color="#0f766e"];
+  n3 -> n4 [label="spawn + 80 ms", color="#0f766e"];
+  n4 -> n5 [label="continue + 150 ms"];
   n5 -> n6 [label="continue + 150 ms"];
-  n6 -> n7 [label="continue + 150 ms"];
-  n7 -> n8 [label="blocking join + 80 ms", color="#7c3aed"];
-  n8 -> n9 [label="continue"];
-  n9 -> n10 [label="continue + 150 ms"];
-  n10 -> n11 [label="continue"];
-  n12 -> n13 [label="continue + 120 ms"];
-  n13 -> n14 [label="spawn + 80 ms", color="#0f766e"];
-  n14 -> n15 [label="continue + 346 ms"];
-  n15 -> n16 [label="continue + 150 ms"];
-  n16 -> n17 [label="continue"];
-  n13 -> n18 [label="spawn + 80 ms", color="#0f766e"];
-  n18 -> n19 [label="continue + 1739 ms"];
-  n19 -> n20 [label="continue"];
-  n20 -> n21 [label="continue + 150 ms"];
-  n21 -> n22 [label="continue"];
+  n6 -> n7 [label="blocking join + 80 ms", color="#7c3aed"];
+  n7 -> n8 [label="continue"];
+  n8 -> n9 [label="continue + 150 ms"];
+  n9 -> n10 [label="continue"];
+  n11 -> n12 [label="continue + 120 ms"];
+  n12 -> n13 [label="spawn + 80 ms", color="#0f766e"];
+  n13 -> n14 [label="continue + 346 ms"];
+  n14 -> n15 [label="continue + 150 ms"];
+  n15 -> n16 [label="continue"];
+  n12 -> n17 [label="spawn + 80 ms", color="#0f766e"];
+  n17 -> n18 [label="continue + 1739 ms"];
+  n18 -> n19 [label="continue"];
+  n19 -> n20 [label="continue + 150 ms"];
+  n20 -> n21 [label="continue"];
+  join_22 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
+  n16 -> join_22 [label="child complete", color="#7c3aed"];
+  n21 -> join_22 [label="child complete", color="#7c3aed"];
+  join_22 -> n22 [label="join + 80 ms", color="#7c3aed"];
   n22 -> n23 [label="continue"];
-  join_24 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
-  n17 -> join_24 [label="child complete", color="#7c3aed"];
-  n23 -> join_24 [label="child complete", color="#7c3aed"];
-  join_24 -> n24 [label="join + 80 ms", color="#7c3aed"];
-  n24 -> n25 [label="continue"];
-  n25 -> n26 [label="spawn + 80 ms", color="#0f766e"];
-  n26 -> n27 [label="continue + 150 ms"];
+  n23 -> n24 [label="spawn + 80 ms", color="#0f766e"];
+  n24 -> n25 [label="continue + 150 ms"];
+  n25 -> n26 [label="continue + 150 ms"];
+  n23 -> n27 [label="spawn + 80 ms", color="#0f766e"];
   n27 -> n28 [label="continue + 150 ms"];
-  n25 -> n29 [label="spawn + 80 ms", color="#0f766e"];
-  n29 -> n30 [label="continue + 150 ms"];
-  n30 -> n31 [label="continue + 150 ms"];
-  join_32 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
-  n28 -> join_32 [label="child complete", color="#7c3aed"];
-  n31 -> join_32 [label="child complete", color="#7c3aed"];
-  join_32 -> n32 [label="join + 80 ms", color="#7c3aed"];
+  n28 -> n29 [label="continue + 150 ms"];
+  join_30 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
+  n26 -> join_30 [label="child complete", color="#7c3aed"];
+  n29 -> join_30 [label="child complete", color="#7c3aed"];
+  join_30 -> n30 [label="join + 80 ms", color="#7c3aed"];
+  n30 -> n31 [label="continue"];
+  n31 -> n32 [label="continue + 325 ms"];
   n32 -> n33 [label="continue"];
-  n33 -> n34 [label="continue"];
-  n34 -> n35 [label="continue"];
-  n35 -> n36 [label="continue + 325 ms"];
-  n36 -> n37 [label="continue"];
-  n38 -> n39 [label="spawn + 80 ms", color="#0f766e"];
+  n34 -> n35 [label="spawn + 80 ms", color="#0f766e"];
+  n35 -> n36 [label="continue + 150 ms"];
+  n36 -> n37 [label="continue + 150 ms"];
+  n34 -> n38 [label="spawn + 80 ms", color="#0f766e"];
+  n38 -> n39 [label="continue + 150 ms"];
   n39 -> n40 [label="continue + 150 ms"];
-  n40 -> n41 [label="continue + 150 ms"];
-  n38 -> n42 [label="spawn + 80 ms", color="#0f766e"];
-  n42 -> n43 [label="continue + 150 ms"];
-  n43 -> n44 [label="continue + 150 ms"];
-  join_45 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
-  n41 -> join_45 [label="child complete", color="#7c3aed"];
-  n44 -> join_45 [label="child complete", color="#7c3aed"];
-  join_45 -> n45 [label="join + 80 ms", color="#7c3aed"];
-  n45 -> n46 [label="spawn + 80 ms", color="#0f766e"];
-  n46 -> n47 [label="continue + 250 ms"];
-  n47 -> n48 [label="continue + 4317 ms"];
-  n48 -> n49 [label="continue"];
-  n49 -> n50 [label="continue"];
-  n45 -> n51 [label="parent continues + 80 ms"];
+  join_41 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
+  n37 -> join_41 [label="child complete", color="#7c3aed"];
+  n40 -> join_41 [label="child complete", color="#7c3aed"];
+  join_41 -> n41 [label="join + 80 ms", color="#7c3aed"];
+  n41 -> n42 [label="spawn + 80 ms", color="#0f766e"];
+  n42 -> n43 [label="continue + 250 ms"];
+  n43 -> n44 [label="continue + 4317 ms"];
+  n44 -> n45 [label="continue"];
+  n41 -> n46 [label="parent continues + 80 ms"];
+  n46 -> n47 [label="continue"];
+  n47 -> n48 [label="spawn + 80 ms", color="#0f766e"];
+  n48 -> n49 [label="continue + 150 ms"];
+  n49 -> n50 [label="continue + 150 ms"];
+  n50 -> n51 [label="blocking join + 80 ms", color="#7c3aed"];
   n51 -> n52 [label="continue"];
-  n52 -> n53 [label="spawn + 80 ms", color="#0f766e"];
-  n53 -> n54 [label="continue + 150 ms"];
-  n54 -> n55 [label="continue + 150 ms"];
-  n55 -> n56 [label="blocking join + 80 ms", color="#7c3aed"];
-  n56 -> n57 [label="continue"];
-  n57 -> n58 [label="continue"];
-  n58 -> n59 [label="continue + 2169 ms"];
-  n59 -> n60 [label="continue"];
-  n60 -> n61 [label="continue"];
-  n11 -> n62 [label="stream restart + 350 ms"];
-  n62 -> n63 [label="spawn + 80 ms", color="#0f766e"];
-  n63 -> n64 [label="continue + 150 ms"];
-  n64 -> n65 [label="continue + 1038 ms"];
-  n65 -> n66 [label="continue"];
-  n62 -> n67 [label="spawn + 80 ms", color="#0f766e"];
-  n67 -> n68 [label="continue + 150 ms"];
+  n52 -> n53 [label="continue + 2169 ms"];
+  n53 -> n54 [label="continue"];
+  n10 -> n55 [label="stream restart + 350 ms"];
+  n55 -> n56 [label="spawn + 80 ms", color="#0f766e"];
+  n56 -> n57 [label="continue + 150 ms"];
+  n57 -> n58 [label="continue + 1038 ms"];
+  n58 -> n59 [label="continue"];
+  n55 -> n60 [label="spawn + 80 ms", color="#0f766e"];
+  n60 -> n61 [label="continue + 150 ms"];
+  n61 -> n62 [label="continue + 150 ms"];
+  join_63 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
+  n59 -> join_63 [label="child complete", color="#7c3aed"];
+  n62 -> join_63 [label="child complete", color="#7c3aed"];
+  join_63 -> n63 [label="join + 80 ms", color="#7c3aed"];
+  n63 -> n64 [label="spawn + 80 ms", color="#0f766e"];
+  n64 -> n65 [label="continue + 150 ms"];
+  n65 -> n66 [label="continue + 150 ms"];
+  n63 -> n67 [label="spawn + 80 ms", color="#0f766e"];
+  n67 -> n68 [label="continue + 743 ms"];
   n68 -> n69 [label="continue + 150 ms"];
   join_70 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
   n66 -> join_70 [label="child complete", color="#7c3aed"];
   n69 -> join_70 [label="child complete", color="#7c3aed"];
   join_70 -> n70 [label="join + 80 ms", color="#7c3aed"];
-  n70 -> n71 [label="spawn + 80 ms", color="#0f766e"];
-  n71 -> n72 [label="continue + 150 ms"];
-  n72 -> n73 [label="continue + 150 ms"];
-  n70 -> n74 [label="spawn + 80 ms", color="#0f766e"];
-  n74 -> n75 [label="continue + 743 ms"];
-  n75 -> n76 [label="continue + 150 ms"];
-  join_77 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
-  n73 -> join_77 [label="child complete", color="#7c3aed"];
-  n76 -> join_77 [label="child complete", color="#7c3aed"];
-  join_77 -> n77 [label="join + 80 ms", color="#7c3aed"];
+  n70 -> n71 [label="continue"];
+  n71 -> n72 [label="spawn + 80 ms", color="#0f766e"];
+  n72 -> n73 [label="continue + 2421 ms"];
+  n73 -> n74 [label="continue"];
+  n74 -> n75 [label="continue + 150 ms"];
+  n75 -> n76 [label="continue"];
+  n76 -> n77 [label="blocking join + 80 ms", color="#7c3aed"];
   n77 -> n78 [label="continue"];
-  n78 -> n79 [label="continue"];
-  n79 -> n80 [label="spawn + 80 ms", color="#0f766e"];
-  n80 -> n81 [label="continue + 2421 ms"];
-  n81 -> n82 [label="continue"];
-  n82 -> n83 [label="continue + 150 ms"];
-  n83 -> n84 [label="continue"];
-  n84 -> n85 [label="continue"];
-  n85 -> n86 [label="continue"];
-  n86 -> n87 [label="blocking join + 80 ms", color="#7c3aed"];
-  n87 -> n88 [label="continue"];
-  n88 -> n89 [label="continue"];
-  n89 -> n90 [label="continue"];
-  n90 -> n91 [label="continue + 682 ms"];
-  n91 -> n92 [label="continue"];
-  n92 -> n93 [label="continue"];
-  n37 -> n94 [label="stream restart + 350 ms"];
-  n94 -> n95 [label="continue + 662 ms"];
-  n95 -> n96 [label="spawn + 80 ms", color="#0f766e"];
-  n96 -> n97 [label="continue + 150 ms"];
+  n78 -> n79 [label="continue + 682 ms"];
+  n79 -> n80 [label="continue"];
+  n33 -> n81 [label="stream restart + 350 ms"];
+  n81 -> n82 [label="continue + 662 ms"];
+  n82 -> n83 [label="spawn + 80 ms", color="#0f766e"];
+  n83 -> n84 [label="continue + 150 ms"];
+  n84 -> n85 [label="continue + 150 ms"];
+  n85 -> n86 [label="blocking join + 80 ms", color="#7c3aed"];
+  n86 -> n87 [label="spawn + 80 ms", color="#0f766e"];
+  n87 -> n88 [label="continue + 150 ms"];
+  n88 -> n89 [label="continue + 150 ms"];
+  n86 -> n90 [label="spawn + 80 ms", color="#0f766e"];
+  n90 -> n91 [label="continue + 150 ms"];
+  n91 -> n92 [label="continue + 150 ms"];
+  join_93 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
+  n89 -> join_93 [label="child complete", color="#7c3aed"];
+  n92 -> join_93 [label="child complete", color="#7c3aed"];
+  join_93 -> n93 [label="join + 80 ms", color="#7c3aed"];
+  n93 -> n94 [label="continue"];
+  n94 -> n95 [label="spawn + 80 ms", color="#0f766e"];
+  n95 -> n96 [label="continue + 2500 ms"];
+  n96 -> n97 [label="continue"];
   n97 -> n98 [label="continue + 150 ms"];
-  n98 -> n99 [label="blocking join + 80 ms", color="#7c3aed"];
-  n99 -> n100 [label="spawn + 80 ms", color="#0f766e"];
-  n100 -> n101 [label="continue + 150 ms"];
-  n101 -> n102 [label="continue + 150 ms"];
-  n99 -> n103 [label="spawn + 80 ms", color="#0f766e"];
-  n103 -> n104 [label="continue + 150 ms"];
-  n104 -> n105 [label="continue + 150 ms"];
-  join_106 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
-  n102 -> join_106 [label="child complete", color="#7c3aed"];
-  n105 -> join_106 [label="child complete", color="#7c3aed"];
-  join_106 -> n106 [label="join + 80 ms", color="#7c3aed"];
-  n106 -> n107 [label="continue"];
-  n107 -> n108 [label="spawn + 80 ms", color="#0f766e"];
-  n108 -> n109 [label="continue + 2500 ms"];
-  n109 -> n110 [label="continue"];
+  n98 -> n99 [label="continue"];
+  n94 -> n100 [label="spawn + 80 ms", color="#0f766e"];
+  n100 -> n101 [label="continue + 1800 ms"];
+  n101 -> n102 [label="continue"];
+  n102 -> n103 [label="continue + 150 ms"];
+  n103 -> n104 [label="continue"];
+  join_105 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
+  n99 -> join_105 [label="child complete", color="#7c3aed"];
+  n104 -> join_105 [label="child complete", color="#7c3aed"];
+  join_105 -> n105 [label="join + 80 ms", color="#7c3aed"];
+  n105 -> n106 [label="continue"];
+  n54 -> n107 [label="stream restart + 350 ms"];
+  n107 -> n108 [label="continue + 780 ms"];
+  n108 -> n109 [label="continue"];
+  n109 -> n110 [label="continue + 3653 ms"];
   n110 -> n111 [label="continue"];
-  n111 -> n112 [label="continue + 150 ms"];
-  n112 -> n113 [label="continue"];
-  n107 -> n114 [label="spawn + 80 ms", color="#0f766e"];
-  n114 -> n115 [label="continue + 1800 ms"];
+  n111 -> n112 [label="spawn + 80 ms", color="#0f766e"];
+  n112 -> n113 [label="continue + 150 ms"];
+  n113 -> n114 [label="continue + 150 ms"];
+  n114 -> n115 [label="blocking join + 80 ms", color="#7c3aed"];
   n115 -> n116 [label="continue"];
   n116 -> n117 [label="continue + 150 ms"];
   n117 -> n118 [label="continue"];
-  join_119 [shape=diamond, style="filled", label="join all 2 children", fillcolor="#ede9fe", color="#7c3aed", fontname="Helvetica", fontsize=9, margin="0.04,0.02"];
-  n113 -> join_119 [label="child complete", color="#7c3aed"];
-  n118 -> join_119 [label="child complete", color="#7c3aed"];
-  join_119 -> n119 [label="join + 80 ms", color="#7c3aed"];
-  n119 -> n120 [label="continue"];
-  n61 -> n121 [label="stream restart + 350 ms"];
-  n121 -> n122 [label="continue + 780 ms"];
-  n122 -> n123 [label="continue"];
-  n123 -> n124 [label="continue + 3653 ms"];
-  n124 -> n125 [label="continue"];
-  n125 -> n126 [label="continue"];
-  n126 -> n127 [label="spawn + 80 ms", color="#0f766e"];
-  n127 -> n128 [label="continue + 150 ms"];
-  n128 -> n129 [label="continue + 150 ms"];
-  n129 -> n130 [label="blocking join + 80 ms", color="#7c3aed"];
-  n130 -> n131 [label="continue"];
-  n131 -> n132 [label="continue + 150 ms"];
-  n132 -> n133 [label="continue"];
-  n133 -> n134 [label="continue"];
 }

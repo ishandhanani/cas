@@ -12,4 +12,4 @@ cargo run -- plan \
   --output /tmp/complex-concurrency-plan
 ```
 
-The included `plan.dot` is the canonical graph source. `plan.svg` was rendered by Graphviz 2.43.0. The seeded plan contains 135 requests across 26 protocol sessions: six configured top-level trees and 20 generated child sessions. Its seven multi-child joins converge on diamonds so the post-join delay is shown exactly once.
+The included `plan.dot` is the canonical graph source. `plan.svg` was rendered by Graphviz 2.43.0. The seeded plan contains 119 requests across 26 protocol sessions: six configured top-level trees and 20 generated child sessions. It has 29 logical compactions, each with one physical attempt because synthetic abort and retry injection are disabled. Its seven multi-child joins converge on diamonds so the post-join delay is shown exactly once.

@@ -36,8 +36,8 @@ trigger_fraction = 0.75
 summary_input_tokens = { kind = "fixed", value = 512 }
 summary_output_tokens = { kind = "fixed", value = 1024 }
 retained_recent_tokens = 4096
-abort_probability = 0.25
-retry_probability = 0.25
+abort_probability = 0.0
+retry_probability = 0.0
 max_attempts = 3
 abort_after_ms = { kind = "fixed", value = 25 }
 
