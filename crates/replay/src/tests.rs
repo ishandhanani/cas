@@ -14,7 +14,7 @@ use tempfile::tempdir;
 use super::request::scaled_offset_ns;
 use super::*;
 use crate::token_shape::{SafeTokenAlphabet, TokenDictionary};
-use agent_loadgen_core::{AgentContext, TraceRequest};
+use agent_loadgen_core::{AgentContext, TraceRequest, percentiles};
 use agent_loadgen_generate::scenario::{GeneratedScenario, GeneratorConfig};
 use agent_loadgen_trace::{AgenticTrace, AgenticTurn};
 
@@ -158,7 +158,7 @@ async fn replay_sends_shape_and_agent_headers() {
     )
     .unwrap();
     let output = tempdir().unwrap();
-    let summary = run_replay(
+    let summary = run_agentic_replay(
         trace,
         dictionary,
         ReplayOptions {
@@ -283,7 +283,7 @@ async fn recorded_scheduler_handles_tied_millisecond_arrivals() {
         },
     };
     let output = tempdir().unwrap();
-    let summary = run_replay(
+    let summary = run_agentic_replay(
         trace,
         dictionary,
         ReplayOptions {
@@ -389,7 +389,7 @@ async fn captured_successor_waits_for_actual_completion_plus_recorded_gap() {
         },
     };
     let output = tempdir().unwrap();
-    let summary = run_replay(
+    let summary = run_agentic_replay(
         trace,
         dictionary,
         ReplayOptions {

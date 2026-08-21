@@ -306,10 +306,9 @@ impl Planner {
                 },
             )?;
             final_node = Some(node);
-            let assistant_tokens = output_tokens;
             state.blocks.extend(self.segment(
                 &format!("session:{}:assistant:{turn}", state.session_id),
-                assistant_tokens,
+                output_tokens,
             )?);
 
             match action {
@@ -721,11 +720,7 @@ impl Planner {
             .iter()
             .flat_map(|node| node.request.input_sequence_hashes.iter().copied())
             .collect::<BTreeSet<_>>();
-        let input_tokens = self.nodes.iter().try_fold(0_u64, |total, node| {
-            total
-                .checked_add(node.request.input_tokens as u64)
-                .context("generated input token total overflow")
-        })?;
+        let input_tokens = self.total_input_tokens;
         let output_tokens = self.nodes.iter().try_fold(0_u64, |total, node| {
             total
                 .checked_add(node.request.output_tokens as u64)

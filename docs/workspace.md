@@ -19,10 +19,10 @@ The repository is one Cargo workspace with four libraries and one thin CLI. The 
 
 | Crate | Owns | Does not own |
 |---|---|---|
-| `agent-loadgen-core` | Agent identity and headers, public trace/request contracts, percentile summaries, stable ready-time scheduling. | HTTP, Tokio, tokenizers, trace file parsing, profiles, or cache policy. |
+| `agent-loadgen-core` | Agent identity, public trace/request contracts, percentile summaries, stable ready-time scheduling. | HTTP, wire-header rendering, Tokio, tokenizers, trace file parsing, profiles, or cache policy. |
 | `agent-loadgen-trace` | `dynamo.request.trace.v1` parsing and validation, Dynamo-style causal lowering, trace comparison. | Request transport or synthetic planning. |
 | `agent-loadgen-generate` | Agent presets, strict TOML profile schema, deterministic distributions, generated scenarios, tools, compaction, and subagent graphs. | Trace parsing, request transport, or engine policy. |
-| `agent-loadgen-replay` | Synthetic token payloads, Chat Completions transport, SSE parsing, captured and generated causal execution, artifacts, and telemetry joins. | Agent workload policy or Dynamo cache policy. |
+| `agent-loadgen-replay` | Synthetic token payloads, Chat Completions transport, agent-to-wire header rendering, SSE parsing, captured and generated causal execution, artifacts, and telemetry joins. | Agent workload policy or Dynamo cache policy. |
 | `agent-loadgen` | CLI parsing, command composition, and process exit status. | Workload semantics or runtime implementation. |
 
 ## Dependency rules
@@ -41,7 +41,8 @@ The repository is one Cargo workspace with four libraries and one thin CLI. The 
 | New captured trace field, validation rule, or lowering edge | `trace` (move the shared serialized contract to `core` only when both trace and replay need it) |
 | New profile knob, distribution, generated tool behavior, compaction rule, or subagent topology | `generate` |
 | Token encoding, HTTP headers, transport behavior, scheduler execution, result fields, run gates, or telemetry joins | `replay` |
-| Shared agent headers, context IDs, request/manifest serialization, generic ready-time scheduling | `core` |
+| Shared agent identity/context IDs, request/manifest serialization, generic ready-time scheduling | `core` |
+| HTTP header rendering and transport-specific static-header validation | `replay` |
 | New subcommand or flag-to-library wiring | CLI |
 
 ## Compatibility boundary

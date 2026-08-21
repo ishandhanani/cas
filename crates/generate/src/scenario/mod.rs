@@ -10,7 +10,7 @@ mod plan;
 mod tool_parallelism;
 
 pub use config::{GeneratorConfig, ResolvedGeneratorConfig};
-pub use graph::{PlanGraphArtifacts, render_plan_dot, write_plan_graph};
+pub use graph::{PlanGraphArtifacts, write_plan_graph};
 pub use model::{
     CompactionExpectedEffect, GeneratedCompactionAttempt, GeneratedCompactionOperation,
     GeneratedNode, GeneratedScenario, GeneratedSession, GeneratedSessionTopology,

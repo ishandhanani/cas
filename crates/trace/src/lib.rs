@@ -35,6 +35,45 @@ struct TraceRecord {
     tool: Option<ToolMetrics>,
 }
 
+/// A single direct record or the nested `event` in a wrapped record.
+///
+/// All fields are optional while deserializing so `request_payload` records can
+/// be discarded before their required request-end fields are validated.
+#[derive(Debug, Deserialize)]
+struct TraceRecordFields {
+    #[serde(default)]
+    schema: Option<String>,
+    #[serde(default)]
+    event_type: Option<String>,
+    #[serde(default)]
+    event_time_unix_ms: Option<u64>,
+    #[serde(default)]
+    agent_context: Option<AgentContext>,
+    #[serde(default)]
+    request: Option<RequestMetrics>,
+    #[serde(default)]
+    tool: Option<ToolMetrics>,
+}
+
+impl TraceRecordFields {
+    fn event_type(&self) -> Option<&str> {
+        self.event_type.as_deref()
+    }
+
+    fn finish(self) -> Result<TraceRecord> {
+        Ok(TraceRecord {
+            schema: self.schema.context("trace record has no schema")?,
+            event_type: self.event_type.context("trace record has no event_type")?,
+            event_time_unix_ms: self
+                .event_time_unix_ms
+                .context("trace record has no event_time_unix_ms")?,
+            agent_context: self.agent_context,
+            request: self.request,
+            tool: self.tool,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct RequestMetrics {
     request_id: String,
@@ -97,14 +136,14 @@ pub(crate) struct ClaudeToolReplayMetrics {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum JsonLineEnvelope {
-    Object(TraceRecordEnvelope),
+    Object(Box<TraceRecordEnvelope>),
     Other(IgnoredAny),
 }
 
 #[derive(Debug, Deserialize)]
 struct TraceRecordEnvelope {
-    #[serde(default)]
-    event_type: Option<String>,
+    #[serde(flatten)]
+    record: TraceRecordFields,
     #[serde(default)]
     event: Option<TraceEventEnvelope>,
 }
@@ -112,19 +151,8 @@ struct TraceRecordEnvelope {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum TraceEventEnvelope {
-    Object(TraceEventFields),
+    Object(Box<TraceRecordFields>),
     Other(IgnoredAny),
-}
-
-#[derive(Debug, Deserialize)]
-struct TraceEventFields {
-    #[serde(default)]
-    event_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WrappedTraceRecord {
-    event: TraceRecord,
 }
 
 #[derive(Debug, Clone)]
@@ -303,26 +331,18 @@ fn read_path(
 
 fn parse_trace_record(line: &str) -> Result<Option<TraceRecord>> {
     let envelope = match serde_json::from_str::<JsonLineEnvelope>(line)? {
-        JsonLineEnvelope::Object(envelope) => envelope,
+        JsonLineEnvelope::Object(envelope) => *envelope,
         JsonLineEnvelope::Other(_) => return Ok(None),
     };
-    match envelope.event {
-        Some(TraceEventEnvelope::Object(event)) => {
-            if event.event_type.as_deref() == Some("request_payload") {
-                return Ok(None);
-            }
-            Ok(Some(
-                serde_json::from_str::<WrappedTraceRecord>(line)?.event,
-            ))
-        }
-        Some(TraceEventEnvelope::Other(_)) => Ok(None),
-        None => {
-            if envelope.event_type.as_deref() == Some("request_payload") {
-                return Ok(None);
-            }
-            Ok(Some(serde_json::from_str(line)?))
-        }
+    let record = match envelope.event {
+        Some(TraceEventEnvelope::Object(record)) => *record,
+        Some(TraceEventEnvelope::Other(_)) => return Ok(None),
+        None => envelope.record,
+    };
+    if record.event_type() == Some("request_payload") {
+        return Ok(None);
     }
+    Ok(Some(record.finish()?))
 }
 
 fn open_trace(path: &Path) -> Result<Box<dyn BufRead>> {
@@ -337,55 +357,57 @@ fn open_trace(path: &Path) -> Result<Box<dyn BufRead>> {
 }
 
 fn compile_request(record: TraceRecord) -> Result<RequestEntry> {
-    let request = record
-        .request
-        .context("request_end has no request metrics")?;
-    let replay = request
-        .replay
-        .as_ref()
-        .context("request_end has no replay metrics")?;
-    if replay.trace_block_size == 0 {
+    let TraceRecord {
+        event_time_unix_ms,
+        agent_context,
+        request,
+        ..
+    } = record;
+    let RequestMetrics {
+        request_id,
+        x_request_id,
+        model,
+        input_tokens,
+        output_tokens,
+        request_received_ms,
+        total_time_ms,
+        replay,
+    } = request.context("request_end has no request metrics")?;
+    let ReplayMetrics {
+        trace_block_size,
+        input_length,
+        input_sequence_hashes,
+    } = replay.context("request_end has no replay metrics")?;
+    if trace_block_size == 0 {
         bail!("trace_block_size must be greater than zero");
     }
-    if replay.input_length == 0 {
+    if input_length == 0 {
         bail!("input_length must be greater than zero");
     }
-    let required_hashes = replay.input_length.div_ceil(replay.trace_block_size);
-    if replay.input_sequence_hashes.len() != required_hashes {
+    let required_hashes = input_length.div_ceil(trace_block_size);
+    if input_sequence_hashes.len() != required_hashes {
         bail!(
             "request {} has {} replay hashes, expected {}",
-            request.request_id,
-            replay.input_sequence_hashes.len(),
+            request_id,
+            input_sequence_hashes.len(),
             required_hashes
         );
     }
-    if request
-        .input_tokens
-        .is_some_and(|input_tokens| input_tokens != replay.input_length as u64)
-    {
+    if input_tokens.is_some_and(|input_tokens| input_tokens != input_length as u64) {
         bail!(
             "request {} input_tokens does not match replay input_length",
-            request.request_id
+            request_id
         );
     }
-    let output_tokens = request
-        .output_tokens
-        .context("request has no output_tokens")?;
+    let output_tokens = output_tokens.context("request has no output_tokens")?;
     let output_tokens = u32::try_from(output_tokens).context("output_tokens does not fit u32")?;
     if output_tokens == 0 {
-        bail!("request {} has zero output tokens", request.request_id);
+        bail!("request {} has zero output tokens", request_id);
     }
-    let request_received_ms = request
-        .request_received_ms
-        .context("request has no request_received_ms")?;
-    let total_ms = request
-        .total_time_ms
+    let request_received_ms = request_received_ms.context("request has no request_received_ms")?;
+    let total_ms = total_time_ms
         .map(|value| value.max(0.0).round() as u64)
-        .unwrap_or_else(|| {
-            record
-                .event_time_unix_ms
-                .saturating_sub(request_received_ms)
-        });
+        .unwrap_or_else(|| event_time_unix_ms.saturating_sub(request_received_ms));
     let request_completed_ms = request_received_ms.saturating_add(total_ms);
 
     Ok(RequestEntry {
@@ -393,15 +415,15 @@ fn compile_request(record: TraceRecord) -> Result<RequestEntry> {
         end_ms: saturating_i64(request_completed_ms),
         request: TraceRequest {
             ordinal: 0,
-            source_request_id: request.request_id,
-            source_x_request_id: request.x_request_id,
-            source_model: request.model,
-            input_tokens: replay.input_length,
+            source_request_id: request_id,
+            source_x_request_id: x_request_id,
+            source_model: model,
+            input_tokens: input_length,
             output_tokens,
             request_received_ms,
-            trace_block_size: replay.trace_block_size,
-            input_sequence_hashes: replay.input_sequence_hashes.clone(),
-            agent_context: record.agent_context,
+            trace_block_size,
+            input_sequence_hashes,
+            agent_context,
         },
     })
 }
@@ -452,16 +474,25 @@ fn make_manifest<'a>(
     requests: impl IntoIterator<Item = &'a TraceRequest>,
     source_digest: &[u8],
 ) -> Result<TraceManifest> {
-    let requests = requests.into_iter().collect::<Vec<_>>();
-    let first = requests.first().context("trace has no requests")?;
-    let last = requests.last().context("trace has no requests")?;
+    let mut requests = requests.into_iter();
+    let first = requests.next().context("trace has no requests")?;
     let mut sessions = BTreeSet::new();
     let mut hashes = BTreeSet::new();
     let mut block_sizes = BTreeSet::new();
-    let mut input_tokens = 0_u64;
-    let mut output_tokens = 0_u64;
+    let mut input_tokens = first.input_tokens as u64;
+    let mut output_tokens = first.output_tokens as u64;
+    let mut request_count = 1_usize;
+    let mut last_request_received_ms = first.request_received_ms;
 
-    for request in &requests {
+    let context = first
+        .agent_context
+        .as_ref()
+        .context("agent-loadgen requires agent_context on every request")?;
+    sessions.insert(&context.session_id);
+    hashes.extend(first.input_sequence_hashes.iter().copied());
+    block_sizes.insert(first.trace_block_size);
+
+    for request in requests {
         let context = request
             .agent_context
             .as_ref()
@@ -475,20 +506,20 @@ fn make_manifest<'a>(
         output_tokens = output_tokens
             .checked_add(request.output_tokens as u64)
             .context("output token count overflow")?;
+        last_request_received_ms = request.request_received_ms;
+        request_count += 1;
     }
     if block_sizes.len() != 1 {
         bail!("shape-strict replay requires one trace_block_size, found {block_sizes:?}");
     }
 
     Ok(TraceManifest {
-        request_count: requests.len(),
+        request_count,
         session_count: sessions.len(),
-        requests_with_agent_context: requests.len(),
+        requests_with_agent_context: request_count,
         first_request_received_ms: first.request_received_ms,
-        last_request_received_ms: last.request_received_ms,
-        duration_ms: last
-            .request_received_ms
-            .saturating_sub(first.request_received_ms),
+        last_request_received_ms,
+        duration_ms: last_request_received_ms.saturating_sub(first.request_received_ms),
         input_tokens,
         output_tokens,
         distinct_sequence_hashes: hashes.len(),
@@ -588,6 +619,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_request_ids_during_loading() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            request_record("duplicate", "thread-1", 1_000, 1_100, &[11])
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            request_record("duplicate", "thread-1", 1_200, 1_300, &[22])
+        )
+        .unwrap();
+
+        let error = load_agentic_trace(&[file.path().to_path_buf()], None, None).unwrap_err();
+        assert!(format!("{error:#}").contains("duplicate request_id duplicate"));
+    }
+
+    #[test]
     fn loads_wrapped_records_and_sorts_before_limit() {
         let mut file = NamedTempFile::new().unwrap();
         let late = request_record("late", "thread-1", 1_200, 1_300, &[22]);
@@ -608,5 +659,25 @@ mod tests {
         let trace = load_agentic_trace(&[file.path().to_path_buf()], Some(1), None).unwrap();
         assert_eq!(trace.turns.len(), 1);
         assert_eq!(trace.turns[0].request.source_request_id, "early");
+    }
+
+    #[test]
+    fn parses_direct_and_wrapped_records_once_while_skipping_payloads() {
+        let direct = request_record("direct", "thread-1", 1_000, 1_100, &[11]);
+        let direct = parse_trace_record(&direct.to_string()).unwrap().unwrap();
+        assert_eq!(direct.request.unwrap().request_id, "direct");
+
+        let wrapped = serde_json::json!({
+            "timestamp": 1,
+            "event": request_record("wrapped", "thread-1", 1_000, 1_100, &[11]),
+        });
+        let wrapped = parse_trace_record(&wrapped.to_string()).unwrap().unwrap();
+        assert_eq!(wrapped.request.unwrap().request_id, "wrapped");
+
+        let payload = serde_json::json!({"event_type": "request_payload", "payload": [1, 2]});
+        assert!(parse_trace_record(&payload.to_string()).unwrap().is_none());
+
+        let malformed = serde_json::json!({"event_type": "request_end"});
+        assert!(parse_trace_record(&malformed.to_string()).is_err());
     }
 }

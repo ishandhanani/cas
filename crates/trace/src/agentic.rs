@@ -28,6 +28,10 @@ pub struct AgenticTurn {
     pub tool_events: Vec<AgenticToolEvent>,
 }
 
+/// Terminal tool activity attributed to a dependent model turn.
+///
+/// The scheduler uses the combined residual delay, but this decomposition is
+/// retained for trace diagnostics and agent-behavior calibration.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AgenticToolEvent {
     pub tool_call_id: String,
@@ -52,18 +56,15 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
         .min()
         .ok_or_else(|| anyhow!("no request records to lower"))?;
 
+    // `load_trace` establishes chronological order and unique request IDs before
+    // lowering. Keep borrowed indexes here so lowering does not duplicate every
+    // source ID and session ID before transferring requests into the IR.
     let mut id_to_index = HashMap::with_capacity(loaded.requests.len());
     for (index, request) in loaded.requests.iter().enumerate() {
-        if id_to_index
-            .insert(request.request.source_request_id.clone(), index)
-            .is_some()
-        {
-            bail!("duplicate request_id {}", request.request.source_request_id);
-        }
+        id_to_index.insert(request.request.source_request_id.as_str(), index);
     }
-
-    let mut session_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut parent_by_session: HashMap<String, String> = HashMap::new();
+    let mut session_to_indices: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut parent_by_session: HashMap<&str, &str> = HashMap::new();
     for (index, request) in loaded.requests.iter().enumerate() {
         let context = request
             .request
@@ -71,11 +72,11 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
             .as_ref()
             .expect("trace loading requires agent context");
         session_to_indices
-            .entry(context.session_id.clone())
+            .entry(context.session_id.as_str())
             .or_default()
             .push(index);
         if let Some(parent) = &context.parent_session_id {
-            match parent_by_session.get(&context.session_id) {
+            match parent_by_session.get(context.session_id.as_str()) {
                 Some(existing) if existing != parent => bail!(
                     "session {} has conflicting parent_session_id values: {} and {}",
                     context.session_id,
@@ -84,22 +85,11 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
                 ),
                 Some(_) => {}
                 None => {
-                    parent_by_session.insert(context.session_id.clone(), parent.clone());
+                    parent_by_session.insert(context.session_id.as_str(), parent.as_str());
                 }
             }
         }
     }
-    for indices in session_to_indices.values_mut() {
-        indices.sort_by_key(|index| {
-            let request = &loaded.requests[*index];
-            (
-                request.start_ms,
-                request.end_ms,
-                request.request.source_request_id.clone(),
-            )
-        });
-    }
-
     let mut explicit_tool_by_child = HashMap::new();
     for tool in &loaded.tools {
         let Some(claude) = &tool.claude else {
@@ -151,7 +141,7 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
             continue;
         }
         if explicit_tool_by_child
-            .insert(child_session_id.to_string(), tool)
+            .insert(child_session_id, tool)
             .is_some()
         {
             bail!("multiple tool events reference child session {child_session_id}");
@@ -196,8 +186,9 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
                 .claude
                 .as_ref()
                 .expect("explicit child tool has Claude metadata");
-            let parent_spawn_index =
-                *id_to_index.get(&claude.source_request_id).ok_or_else(|| {
+            let parent_spawn_index = *id_to_index
+                .get(claude.source_request_id.as_str())
+                .ok_or_else(|| {
                     anyhow!(
                         "tool {} references unknown source request {}",
                         tool.tool_call_id,
@@ -253,10 +244,10 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
     }
     validate_dependency_dag(&loaded.requests, &dependencies)?;
 
-    let mut tools_by_session: HashMap<String, Vec<ToolEntry>> = HashMap::new();
-    for tool in loaded.tools {
+    let mut tools_by_session: HashMap<&str, Vec<&ToolEntry>> = HashMap::new();
+    for tool in &loaded.tools {
         tools_by_session
-            .entry(tool.session_id.clone())
+            .entry(tool.session_id.as_str())
             .or_default()
             .push(tool);
     }
@@ -295,7 +286,7 @@ pub(super) fn lower(loaded: LoadedTrace) -> Result<AgenticTrace> {
                 let tool_event_start_ms =
                     previous_request_start_ms[index].unwrap_or(dependency_end_ms);
                 let (raw_tool_wait_ms, contributing) = tools_by_session
-                    .get(&context.session_id)
+                    .get(context.session_id.as_str())
                     .map(|tools| {
                         collect_tools_in_window(
                             tools,
@@ -366,7 +357,7 @@ fn first_request_starting_after(
 }
 
 fn collect_tools_in_window<'a>(
-    tools: &'a [ToolEntry],
+    tools: &[&'a ToolEntry],
     request_id: &str,
     event_start_ms: i64,
     wait_start_ms: i64,
@@ -388,7 +379,7 @@ fn collect_tools_in_window<'a>(
         {
             continue;
         }
-        contributing.push(tool);
+        contributing.push(*tool);
         let clipped_start = tool.start_ms.max(wait_start_ms);
         let clipped_end = tool.end_ms.min(end_ms);
         if clipped_end > clipped_start {
@@ -565,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_background_metadata_preserves_spawn_and_late_join() {
+    fn explicit_background_metadata_preserves_spawn_join_and_tool_diagnostics() {
         let trace = lower(LoadedTrace {
             requests: vec![
                 entry("parent-1", "root", None, 1_000, 1_100),
@@ -573,24 +564,39 @@ mod tests {
                 entry("parent-2", "root", None, 1_300, 1_400),
                 entry("parent-3", "root", None, 1_850, 1_950),
             ],
-            tools: vec![ToolEntry {
-                session_id: "root".to_string(),
-                start_ms: 1_100,
-                end_ms: 1_800,
-                tool_call_id: "agent-call".to_string(),
-                tool_class: "Agent".to_string(),
-                claude: Some(ClaudeToolReplayMetrics {
-                    source_request_id: "parent-1".to_string(),
-                    consumer_request_id: Some("parent-3".to_string()),
-                    child_session_id: Some("child".to_string()),
-                    execution_mode: "background".to_string(),
-                }),
-                status: "succeeded".to_string(),
-                duration_ms: 700.0,
-                output_bytes: None,
-                output_tokens: None,
-                error_type: None,
-            }],
+            tools: vec![
+                ToolEntry {
+                    session_id: "root".to_string(),
+                    start_ms: 1_100,
+                    end_ms: 1_800,
+                    tool_call_id: "agent-call".to_string(),
+                    tool_class: "Agent".to_string(),
+                    claude: Some(ClaudeToolReplayMetrics {
+                        source_request_id: "parent-1".to_string(),
+                        consumer_request_id: Some("parent-3".to_string()),
+                        child_session_id: Some("child".to_string()),
+                        execution_mode: "background".to_string(),
+                    }),
+                    status: "succeeded".to_string(),
+                    duration_ms: 700.0,
+                    output_bytes: None,
+                    output_tokens: None,
+                    error_type: None,
+                },
+                ToolEntry {
+                    session_id: "root".to_string(),
+                    start_ms: 1_750,
+                    end_ms: 1_830,
+                    tool_call_id: "shell".to_string(),
+                    tool_class: "Bash".to_string(),
+                    claude: None,
+                    status: "succeeded".to_string(),
+                    duration_ms: 80.0,
+                    output_bytes: Some(16),
+                    output_tokens: Some(4),
+                    error_type: None,
+                },
+            ],
             manifest: manifest(4),
         })
         .unwrap();
@@ -599,7 +605,9 @@ mod tests {
         assert_eq!(trace.turns[2].dependencies, vec![0]);
         assert_eq!(trace.turns[3].dependencies, vec![2, 1]);
         assert_eq!(trace.turns[3].delay_after_dependencies_ms, 150);
-        assert_eq!(trace.turns[3].tool_wait_ms, 100);
-        assert_eq!(trace.turns[3].non_tool_delay_ms, 50);
+        assert_eq!(trace.turns[3].tool_wait_ms, 130);
+        assert_eq!(trace.turns[3].non_tool_delay_ms, 20);
+        assert_eq!(trace.turns[3].tool_events.len(), 2);
+        assert_eq!(trace.turns[3].tool_events[1].output_tokens, Some(4));
     }
 }

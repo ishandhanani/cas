@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::RequestResult;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct EngineTelemetryRecord {
+pub(crate) struct EngineTelemetryRecord {
     #[serde(alias = "x_request_id")]
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

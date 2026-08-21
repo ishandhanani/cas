@@ -15,6 +15,7 @@ use crate::token_shape::TokenDictionaryManifest;
 
 mod artifacts;
 mod captured;
+mod causal;
 mod clock;
 mod generated;
 mod request;
@@ -25,12 +26,10 @@ pub mod token_shape;
 pub use captured::run_agentic_replay;
 pub use generated::run_generated_scenario;
 
-pub use agent_loadgen_core::{Percentiles, percentiles};
+pub use agent_loadgen_core::Percentiles;
 
 #[cfg(test)]
 use artifacts::{RunAccumulator, dispatch_timing_matches};
-#[cfg(test)]
-use captured::run_replay;
 #[cfg(test)]
 use request::{chunk_contains_output, normalize_target};
 
@@ -63,7 +62,7 @@ pub struct ReplayOptions {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RequestResult {
+pub(crate) struct RequestResult {
     pub ordinal: usize,
     pub source_request_id: String,
     pub source_x_request_id: Option<String>,

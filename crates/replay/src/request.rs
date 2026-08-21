@@ -15,7 +15,70 @@ use super::{
     RequestExecution, RequestResult, millis,
 };
 use crate::token_shape::TokenDictionary;
-use agent_loadgen_core::{TraceRequest, agent_headers, is_managed_header};
+use agent_loadgen_core::{AgentContext, AgentKind, TraceRequest};
+
+fn agent_headers(kind: AgentKind, context: Option<&AgentContext>) -> Vec<(&'static str, String)> {
+    let Some(context) = context else {
+        return Vec::new();
+    };
+    let mut headers = vec![("x-dynamo-session-id", context.session_id.clone())];
+    if let Some(parent) = &context.parent_session_id {
+        headers.push(("x-dynamo-parent-session-id", parent.clone()));
+    }
+    headers.extend(match kind {
+        AgentKind::ClaudeCode => {
+            if let Some(parent) = &context.parent_session_id {
+                vec![
+                    ("x-claude-code-session-id", parent.clone()),
+                    ("x-claude-code-agent-id", context.session_id.clone()),
+                    ("x-claude-code-parent-agent-id", parent.clone()),
+                ]
+            } else {
+                vec![("x-claude-code-session-id", context.session_id.clone())]
+            }
+        }
+        AgentKind::Codex => {
+            let mut values = vec![("thread-id", context.session_id.clone())];
+            if let Some(parent) = &context.parent_session_id {
+                values.push(("x-codex-parent-thread-id", parent.clone()));
+            }
+            values
+        }
+        AgentKind::Opencode => {
+            let mut values = vec![("x-session-id", context.session_id.clone())];
+            if let Some(parent) = &context.parent_session_id {
+                values.push(("x-parent-session-id", parent.clone()));
+            }
+            values
+        }
+    });
+    if let (AgentKind::Codex, Some(compaction)) = (kind, context.compaction.as_ref()) {
+        headers.push((
+            "x-codex-turn-metadata",
+            json!({"request_kind": "compaction", "compaction": compaction}).to_string(),
+        ));
+    }
+    headers
+}
+
+fn is_managed_header(name: &str) -> bool {
+    const MANAGED_HEADERS: &[&str] = &[
+        "x-request-id",
+        "x-dynamo-session-id",
+        "x-dynamo-parent-session-id",
+        "x-claude-code-session-id",
+        "x-claude-code-agent-id",
+        "x-claude-code-parent-agent-id",
+        "thread-id",
+        "x-codex-parent-thread-id",
+        "x-codex-turn-metadata",
+        "x-session-id",
+        "x-parent-session-id",
+    ];
+    MANAGED_HEADERS
+        .iter()
+        .any(|header| name.eq_ignore_ascii_case(header))
+}
 
 pub(super) fn normalize_target(target: &str) -> String {
     let target = target.trim_end_matches('/');
@@ -499,4 +562,58 @@ fn selected_response_headers(headers: &reqwest::header::HeaderMap) -> BTreeMap<S
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn child_context() -> AgentContext {
+        AgentContext {
+            session_id: "child".to_string(),
+            parent_session_id: Some("parent".to_string()),
+            compaction: None,
+            input_trigger: None,
+        }
+    }
+
+    #[test]
+    fn agent_header_adapters_preserve_child_identity() {
+        let context = child_context();
+        assert_eq!(
+            agent_headers(AgentKind::Codex, Some(&context)),
+            vec![
+                ("x-dynamo-session-id", "child".to_string()),
+                ("x-dynamo-parent-session-id", "parent".to_string()),
+                ("thread-id", "child".to_string()),
+                ("x-codex-parent-thread-id", "parent".to_string()),
+            ]
+        );
+        assert_eq!(
+            agent_headers(AgentKind::ClaudeCode, Some(&context)),
+            vec![
+                ("x-dynamo-session-id", "child".to_string()),
+                ("x-dynamo-parent-session-id", "parent".to_string()),
+                ("x-claude-code-session-id", "parent".to_string()),
+                ("x-claude-code-agent-id", "child".to_string()),
+                ("x-claude-code-parent-agent-id", "parent".to_string()),
+            ]
+        );
+        assert_eq!(
+            agent_headers(AgentKind::Opencode, Some(&context)),
+            vec![
+                ("x-dynamo-session-id", "child".to_string()),
+                ("x-dynamo-parent-session-id", "parent".to_string()),
+                ("x-session-id", "child".to_string()),
+                ("x-parent-session-id", "parent".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_header_names_are_case_insensitive() {
+        assert!(is_managed_header("X-Request-ID"));
+        assert!(is_managed_header("thread-id"));
+        assert!(!is_managed_header("authorization"));
+    }
 }
